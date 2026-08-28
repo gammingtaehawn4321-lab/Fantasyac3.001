@@ -1,0 +1,18 @@
+import React,{useMemo,useState} from 'react';
+import { PlayerState } from '../types';
+import { ProfessionType } from '../data/professions/professionTypes';
+import { PROFESSIONS_DATABASE,RECIPE_DATABASE } from '../data/professions/professionData';
+import { ACTIVE_CRAFTING_PROFESSIONS,CRAFTING_RANK_LABEL,getCraftingRank,getProfessionProgress } from '../data/professions/professionSystem';
+import { Hammer,FlaskConical,Scissors,LockKeyhole } from 'lucide-react';
+const Icon=({id}:{id:ProfessionType})=>id==='BLACKSMITH'?<Hammer/>:id==='ALCHEMIST'?<FlaskConical/>:<Scissors/>;
+export const CraftingTab:React.FC<{playerState:PlayerState;onCraftRecipe:(id:string)=>void}> = ({playerState,onCraftRecipe})=>{
+ const [prof,setProf]=useState<ProfessionType>('BLACKSMITH'); const [selected,setSelected]=useState<string|undefined>();
+ const recipes=useMemo(()=>Object.values(RECIPE_DATABASE).filter(r=>r.professionId===prof),[prof]); const recipe=recipes.find(r=>r.id===selected)??recipes[0];
+ const reqs=recipe?.professionRequirements?.length?recipe.professionRequirements:[{professionId:prof,minimumLevel:recipe?.requiredLevel??1}];
+ const reqChecks=reqs.map(r=>{const p=getProfessionProgress(playerState.professions,r.professionId);return {...r,current:p.level,ok:p.level>=r.minimumLevel};});
+ const mats=(recipe?.ingredients??[]).map(i=>{const have=playerState.inventory.filter(x=>x.name.trim()===i.itemName.trim()).reduce((a,b)=>a+b.quantity,0);return {...i,have,ok:have>=i.quantity}}); const can=!!recipe&&reqChecks.every(x=>x.ok)&&mats.every(x=>x.ok);
+ return <div className="p-4 text-stone-200"><div className="grid grid-cols-3 gap-2">{ACTIVE_CRAFTING_PROFESSIONS.map(id=>{const p=getProfessionProgress(playerState.professions,id);return <button key={id} onClick={()=>{setProf(id);setSelected(undefined)}} className={`p-3 rounded-xl border ${prof===id?'border-amber-500 bg-amber-950/30':'border-stone-800 bg-stone-950'}`}><span className="flex justify-center gap-2"><Icon id={id}/>{PROFESSIONS_DATABASE[id].name}</span><small className="text-stone-500">Lv.{p.level} · {CRAFTING_RANK_LABEL[getCraftingRank(p.level)]}</small></button>})}</div>
+ <div className="mt-3 border border-dashed border-stone-800 rounded-xl p-2 text-center text-xs text-stone-600"><LockKeyhole className="inline w-3 mr-1"/>추가 제작 생활직업 · 준비 중</div>
+ <div className="grid lg:grid-cols-[320px_1fr] gap-4 mt-4"><div className="space-y-2 max-h-[58dvh] overflow-auto">{recipes.map(r=><button key={r.id} onClick={()=>setSelected(r.id)} className={`w-full text-left p-3 rounded-xl border ${recipe?.id===r.id?'border-amber-500/70 bg-stone-900':'border-stone-800 bg-stone-950'}`}><b>{r.name}</b><div className="text-xs text-stone-500 mt-1">{r.craftingCategory??r.category} · Lv.{r.requiredLevel}</div></button>)}</div>
+ {recipe?<div className="border border-stone-800 bg-stone-950/70 rounded-2xl p-5"><h3 className="text-lg font-bold">{recipe.name}</h3><p className="text-sm text-stone-400 mt-2">{recipe.description}</p><div className="mt-5"><b className="text-sm">생활직업 조건</b>{reqChecks.map(r=><div key={r.professionId} className={`text-sm mt-1 ${r.ok?'text-emerald-400':'text-rose-400'}`}>{PROFESSIONS_DATABASE[r.professionId].name} Lv.{r.minimumLevel} · 현재 Lv.{r.current}</div>)}</div><div className="mt-5"><b className="text-sm">필요 재료</b>{mats.map(m=><div key={m.itemName} className={`text-sm mt-1 ${m.ok?'text-stone-300':'text-rose-400'}`}>{m.itemName} {m.have}/{m.quantity}</div>)}</div><button disabled={!can} onClick={()=>onCraftRecipe(recipe.id)} className={`w-full mt-6 py-3 rounded-xl font-bold ${can?'bg-amber-500 text-black':'bg-stone-800 text-stone-600'}`}>{can?'제작':'제작 조건 부족'}</button></div>:<div className="p-6 text-stone-500">등록된 레시피가 없습니다.</div>}</div></div>
+}
