@@ -1,0 +1,8 @@
+{
+  "name": "판타지악 (Fantasyac)",
+  "description": "Gemini AI가 이끄는 다크 판타지 텍스트 RPG",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

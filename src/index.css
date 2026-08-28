@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  position: fixed;
+  inset: 0;
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+@layer utilities {
+  @keyframes ui-pop-in {
+    from { opacity: 0; transform: translateY(6px) scale(.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes ui-soft-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+    50% { box-shadow: 0 0 0 3px rgba(245, 158, 11, .12); }
+  }
+  .animate-ui-pop-in { animation: ui-pop-in 160ms ease-out both; }
+  .animate-ui-soft-pulse { animation: ui-soft-pulse 900ms ease-out 1; }
+  .touch-target { min-height: 44px; min-width: 44px; }
+}
+
+@layer utilities {
+  .ui-modal-surface {
+    background: rgba(12, 10, 9, .98);
+    border: 1px solid rgb(41 37 36);
+    border-radius: 1rem;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, .48);
+  }
+  .ui-section-surface {
+    background: rgba(28, 25, 23, .5);
+    border: 1px solid rgba(68, 64, 60, .8);
+    border-radius: .875rem;
+  }
+  @media (max-width: 640px) {
+    .ui-mobile-full-modal {
+      width: 100%;
+      max-width: none;
+      max-height: calc(100dvh - 12px);
+      border-radius: .875rem;
+    }
+  }
+}
