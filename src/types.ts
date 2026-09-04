@@ -115,6 +115,56 @@ export interface WorldNavigationTools {
   telescope: boolean;
 }
 
+export type TravelEncounterKind = 'EVENT' | 'MONSTER';
+
+export interface TravelEncounterUnit {
+  id: string;
+  index: number;
+  pathIndex: number;
+  encounterIndexInHex: number;
+  tileId: string;
+  minutes: number;
+  kind: TravelEncounterKind;
+  title: string;
+  summary: string;
+  sceneReference: string;
+  monsterId?: string;
+  monsterName?: string;
+  sourceEncounterId?: string;
+  dragonkinHunter?: boolean;
+}
+
+export type TravelSessionStatus = 'MOVING' | 'ENCOUNTER_PAUSED';
+
+export interface TravelSession {
+  active: boolean;
+  /** 4.0.1: 월드맵이 여행 상태를 소유하고 인카운터는 이를 일시정지한다. */
+  status?: TravelSessionStatus;
+  /** 현재 월드 위치가 pathTileIds의 몇 번째 Hex까지 실제로 진입했는지. */
+  currentPathIndex?: number;
+  /** 인카운터가 실제로 묶여 있는 현재 Hex. */
+  pausedAtHexId?: string;
+  originHexId: string;
+  destinationHexId: string;
+  pathTileIds: string[];
+  travelMode: 'FOOT' | 'AIRSHIP' | 'FLIGHT';
+  encountersPerHex: number;
+  encounters: TravelEncounterUnit[];
+  currentEncounterIndex: number;
+  completedEncounters: number;
+  completedHexSteps: number;
+  completedSkySteps: number;
+  completedCelestialSteps: number;
+  totalHexSteps: number;
+  totalMinutes: number;
+  averageDanger: number;
+  startedAtDay: number;
+  startedAtHour: number;
+  startedAtMinute: number;
+}
+
+export type HostileSiteRuntimeStatus = 'HIDDEN' | 'ACTIVE' | 'CLEARED';
+
 export interface WorldMapState {
   currentHexId: string;
   currentRegionId: WorldRegionId;
@@ -130,6 +180,12 @@ export interface WorldMapState {
   /** 발견한 역참. 실제 이용 가능 여부는 현재 Hex와 역참 연결망으로 판정한다. */
   discoveredWaystationIds?: string[];
   mapRevision: number;
+  /** 목적지를 정한 뒤 인카운터 단위로 진행되는 현재 여행. */
+  travelSession?: TravelSession | null;
+  /** 사용자 작성 적대 거점의 월드 상태. 정의가 enabled일 때만 사용한다. */
+  hostileSiteStates?: Record<string, HostileSiteRuntimeStatus>;
+  /** 현재 데이터 인카운터가 시작된/진행 중인 실제 월드 Hex. TravelSession 좌표와 별개로 추적한다. */
+  activeEncounterHexId?: string | null;
 }
 
 export type FateProgressStatus = 'SELECTED' | 'IN_PROGRESS' | 'BRANCHED' | 'COMPLETED' | 'ABANDONED';
@@ -401,6 +457,107 @@ export interface InventoryItem {
   quality?: 'CRUDE' | 'POOR' | 'NORMAL' | 'FINE' | 'GOOD' | 'SUPERIOR' | 'EXCELLENT' | 'MASTERWORK';
 }
 
+// ============================================================
+// 4.0.2 상점 / 상업 런타임
+// ============================================================
+export type ShopType =
+  | 'GENERAL_GOODS'
+  | 'WEAPON'
+  | 'ARMOR'
+  | 'BLACKSMITH'
+  | 'ALCHEMY'
+  | 'MAGIC'
+  | 'RUNE'
+  | 'FOOD'
+  | 'CLOTHING'
+  | 'MATERIAL'
+  | 'HUNTER'
+  | 'ADVENTURER'
+  | 'CLERIC'
+  | 'MAGITECH'
+  | 'JEWELER'
+  | 'HERBALIST'
+  | 'MINERAL'
+  | 'PET_SUPPLY'
+  | 'WANDERING'
+  | 'BLACK_MARKET'
+  | 'FENCE'
+  | 'COLLECTOR'
+  | 'JUNK'
+  | 'SECRET'
+  | 'AUCTION'
+  | 'SPECIALTY';
+
+export type MerchantTrait =
+  | 'GENEROUS'
+  | 'GREEDY'
+  | 'CAUTIOUS'
+  | 'EXPERT'
+  | 'COLLECTOR'
+  | 'ECCENTRIC';
+
+export type ShopStockKind = 'ITEM' | 'EQUIPMENT';
+
+export interface ShopStockEntry {
+  stockId: string;
+  kind: ShopStockKind;
+  itemId: string;
+  quantity: number;
+  targetQuantity: number;
+  limited: boolean;
+  generatedCycle: number;
+}
+
+export interface MerchantRuntimeState {
+  merchantId: string;
+  affinity: number;
+  stock: ShopStockEntry[];
+  restockCycle: number;
+  lastRestockAbsoluteMinute: number;
+  recentTransactionIds: string[];
+  /** 4.0.5: 상인별 하루 1회 흥정 기록. */
+  lastHaggleDay?: number;
+  /** 4.0.5: 다음 1회 구매에만 적용되는 흥정 배율. 1 미만이면 할인. */
+  pendingHaggleBuyModifier?: number;
+  /** 4.0.5: 다음 1회 판매에만 적용되는 흥정 배율. 1 초과이면 우대 매입. */
+  pendingHaggleSellModifier?: number;
+  /** 4.0.5: 현재 흥정 효과의 남은 사용 횟수. */
+  pendingHaggleUses?: number;
+  /** 누적 거래 횟수. 친밀도/단골 UI와 디버그에 사용한다. */
+  totalTransactions?: number;
+}
+
+export interface CommerceRuntimeState {
+  schemaVersion: 2;
+  merchants: Record<string, MerchantRuntimeState>;
+  transactionSequence: number;
+}
+
+// ============================================================
+// 4.0.5 정착지 / 도시 서비스 / 단골 런타임
+// ============================================================
+export interface SettlementGuildMembership {
+  settlementId: string;
+  joinedDay: number;
+  lastSupplyClaimDay?: number;
+}
+
+export interface SettlementRuntimeState {
+  schemaVersion: 3;
+  visitedSettlementIds: string[];
+  lastSettlementId?: string;
+  bankBalance: number;
+  guildMemberships: Record<string, SettlementGuildMembership>;
+  blackMarketUnlockedSettlementIds: string[];
+  recentAuctionBidKeys: string[];
+  /** 4.0.5: 같은 날 재진입은 1회로만 세는 정착지 방문일 수. */
+  visitCounts: Record<string, number>;
+  /** 마지막으로 방문 카운트를 올린 게임 일자. */
+  lastVisitDayBySettlement: Record<string, number>;
+  /** 정착지별 누적 숙박 횟수. */
+  innStayCounts: Record<string, number>;
+}
+
 export interface BeastFeatures {
   earDescription?: string;
   earColor?: string;
@@ -450,16 +607,32 @@ export interface CharacterProfile {
 export type PartnerCategory = 'HUMANOID' | 'ABERRANT';
 export type SapienceType = 'SAPIENT' | 'INSTINCTIVE' | 'HIVE' | 'UNKNOWN';
 export type BodyCompartmentId = 'COMPARTMENT_1' | 'COMPARTMENT_2' | 'COMPARTMENT_3';
-export type BodyPayloadKind = 'STANDARD_FLUID' | 'INSECTOID_SECRETION' | 'URINE' | 'EGG' | 'PARASITE' | 'OTHER';
-export type BodyPayloadVisualKind = 'MATERIAL' | 'EGG' | 'PARASITE'; // legacy visual grouping
-export type BodyPayloadChannel = 'A' | 'B' | 'C';
+export type BodyPayloadKind = 'STANDARD_FLUID' | 'INSECTOID_SECRETION' | 'URINE' | 'EGG' | 'PARASITE';
 export type BodyPayloadSourceType = 'CHARACTER' | 'MONSTER' | 'PARASITE' | 'ENVIRONMENT' | 'UNKNOWN';
 export type BodyPayloadSourceSex = 'MALE' | 'FEMALE' | 'OTHER' | 'UNKNOWN';
+export type PheromoneLineage = 'INSECTOID' | 'TENTACLE';
+export type PheromoneStrengthTier = 'NONE' | 'TRACE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'OVERWHELMING' | 'RESIDUAL';
+export interface PheromoneLineageState {
+  lineage: PheromoneLineage;
+  activeStrength: number;
+  residualStrength: number;
+  effectiveStrength: number;
+  residualMinutesRemaining: number;
+  tier: PheromoneStrengthTier;
+}
+export interface PheromoneState {
+  INSECTOID: PheromoneLineageState;
+  TENTACLE: PheromoneLineageState;
+}
 export interface BodyPayloadTimestamp { day: number; hour: number; minute: number; }
 export type BodyLoadStage = 'EMPTY' | 'TRACE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'SATURATED';
 export type ParasiteMode = 'INSERTED' | 'INTERNAL';
-export type ParasiteStage = 'DORMANT' | 'DEVELOPING' | 'MATURE' | 'RESOLVING';
+export type ParasiteOriginRoute = 'VAGINAL' | 'ANAL';
+export type ParasiteOriginKind = 'INSECTOID' | 'TENTACLE' | 'DIRECT';
+export type ParasiteStage = 'HATCHLING' | 'JUVENILE' | 'MATURE' | 'RESOLVING';
 export type InternalParasiteRegion = 'ENTRY_REGION' | 'ABDOMINAL_REGION' | 'SYSTEMIC' | 'CUSTOM';
+export type EggType = 'INSECTOID_EGG' | 'TENTACLE_EGG';
+export type EggStage = 'DORMANT' | 'ACTIVE' | 'DEVELOPING' | 'HATCH_READY';
 
 export interface PartnerClassification {
   category: PartnerCategory;
@@ -472,9 +645,7 @@ export interface BodyPayloadEntry {
   id: string;
   compartmentId: BodyCompartmentId;
   payloadKind: BodyPayloadKind;
-  /** 사용자 정의 내용물 3계열. UI/삽화/몬스터 배출량은 이 채널을 기준으로 한다. */
-  payloadChannel?: BodyPayloadChannel;
-  /** 같은 세부종/채널을 동일 물질 계열로 취급하기 위한 내부 키. UI에는 노출하지 않는다. */
+  /** 같은 세부종/payloadKind를 동일 물질 계열로 취급하기 위한 내부 키. UI에는 노출하지 않는다. */
   payloadFamilyKey?: string;
   amount: number;
 
@@ -492,23 +663,59 @@ export interface BodyPayloadEntry {
 
   elapsedMinutes: number;
   decayPerHour?: number;
+
+  // EGG에서만 사용. 구 세이브/일반 payload에는 없음.
+  eggType?: EggType;
+  canCausePregnancy?: boolean;
+  /** 곤충/촉수 계통 정액이 만드는 페로몬 판정용. 일반 정액은 undefined. */
+  pheromoneLineage?: PheromoneLineage;
+}
+
+export interface EggCohort {
+  id: string;
+  eggType: EggType;
+  compartmentId: Exclude<BodyCompartmentId, 'COMPARTMENT_3'>;
+  count: number;
+  occupiedAmount: number;
+  sourceId?: string;
+  sourceName?: string;
+  sourceSpeciesId?: string;
+  sourceSpeciesName?: string;
+  sourceType?: BodyPayloadSourceType;
+  depositedAt?: BodyPayloadTimestamp;
+  elapsedActiveMinutes: number;
+  incubationMinutes: number;
+  stage: EggStage;
+  plannedGrowthMode: ParasiteMode;
 }
 
 export interface ParasiteState {
   id: string;
   speciesId: string;
   mode: ParasiteMode;
-  originCompartmentId?: BodyCompartmentId;
-  compartmentId?: BodyCompartmentId;
+  originKind?: ParasiteOriginKind;
+  originEggType?: EggType;
+  originRoute?: ParasiteOriginRoute;
+  originCompartmentId?: Exclude<BodyCompartmentId, 'COMPARTMENT_3'>;
   currentRegion?: InternalParasiteRegion;
   count: number;
   elapsedMinutes: number;
-  incubationMinutes: number;
+  maturationMinutes: number;
   stage: ParasiteStage;
   removable: boolean;
+  sourceId?: string;
+  sourceName?: string;
+  sourceSpeciesId?: string;
+  sourceSpeciesName?: string;
   emissionProgressMinutes?: number;
   emissionIntervalMinutes?: number;
   emissionAmount?: number;
+  emissionPayloadKind?: 'STANDARD_FLUID' | 'INSECTOID_SECRETION';
+
+  /** @deprecated 구 세이브 호환용. 신규 계산에는 사용하지 않는다. */
+  compartmentId?: BodyCompartmentId;
+  /** @deprecated 구 세이브 호환용. maturationMinutes로 마이그레이션한다. */
+  incubationMinutes?: number;
 }
 
 export interface BladderStatus {
@@ -524,6 +731,11 @@ export interface PregnancyState {
   parentASpeciesId?: string;
   parentBSpeciesId?: string;
   childSpeciesId?: string;
+  sourceParentId?: string;
+  sourceParentName?: string;
+  sourceParentSpeciesId?: string;
+  sourceParentSpeciesName?: string;
+  conceptionPayloadId?: string;
   startedAtDay: number;
   startedAtHour: number;
   startedAtMinute: number;
@@ -536,7 +748,6 @@ export interface BodyPayloadChange {
   operation: 'ADD' | 'REMOVE' | 'SET';
   compartmentId: BodyCompartmentId;
   payloadKind: BodyPayloadKind;
-  payloadChannel?: BodyPayloadChannel;
   payloadFamilyKey?: string;
   amount: number;
 
@@ -548,7 +759,11 @@ export interface BodyPayloadChange {
   sourceType?: BodyPayloadSourceType;
   sourceSex?: BodyPayloadSourceSex;
   sourceEventId?: string;
+  canCausePregnancy?: boolean;
+  pheromoneLineage?: PheromoneLineage;
 
+  eggType?: EggType;
+  eggCount?: number;
   parasiteMode?: ParasiteMode;
 }
 
@@ -586,6 +801,27 @@ export type AdultNarrativeCueType =
   | 'ADDICTION_INCREASE'
   | 'ADDICTION_TIER_UP'
 
+  | 'EGG_DEPOSITED'
+  | 'EGG_ACTIVATED'
+  | 'EGG_REACTION_STOPPED'
+  | 'EGG_DEVELOPING'
+  | 'EGG_HATCH_READY'
+  | 'EGG_HATCHED'
+
+  | 'PARASITE_INSERTED_MATURED'
+  | 'PARASITE_INTERNAL_MATURED'
+
+  | 'PREGNANCY_STARTED'
+  | 'PREGNANCY_STAGE_CHANGED'
+  | 'PREGNANCY_READY'
+
+  | 'PHEROMONE_INSECTOID_ACTIVE'
+  | 'PHEROMONE_INSECTOID_RESIDUAL_START'
+  | 'PHEROMONE_INSECTOID_RESIDUAL_END'
+  | 'PHEROMONE_TENTACLE_ACTIVE'
+  | 'PHEROMONE_TENTACLE_RESIDUAL_START'
+  | 'PHEROMONE_TENTACLE_RESIDUAL_END'
+
   | 'CUSTOM';
 
 export interface AdultNarrativeCue {
@@ -597,6 +833,11 @@ export interface AdultNarrativeCue {
   currentValue?: number;
 
   sourceId?: string;
+  previousStage?: string;
+  currentStage?: string;
+  eggType?: EggType;
+  originRoute?: ParasiteOriginRoute;
+  parasiteMode?: ParasiteMode;
 }
 
 export interface AdultStatus {
@@ -718,10 +959,87 @@ export type CompanionTactic =
   | 'STATUS_PRIORITY'
   | 'RESOURCE_SAVING';
 
+export type CompanionKind = 'HUMANOID' | 'PET';
+
+export type PetSpeciesCategory = 'ANIMAL' | 'INSECT';
+
+export type PetSpeciesId =
+  | 'WOLF'
+  | 'DOG'
+  | 'SABER_TIGER'
+  | 'BEAR'
+  | 'BOAR'
+  | 'CHAURUS'
+  | 'CHAURUS_REAPER'
+  | 'MOTH'
+  | 'EUMYO_BUG';
+
+/** 펫 획득은 상점 또는 특수 인카운터 보상 경로에서만 허용한다. */
+export type PetAcquisitionSource = 'SHOP' | 'SPECIAL_ENCOUNTER';
+
 export interface CompanionBond {
   bondLevel: number;
   bondExp: number;
   trust: number; // 0 ~ 100
+  /** 3.3: 신뢰도와 분리된 호감도. 구 세이브에서는 주요 인물 relationship 또는 trust를 바탕으로 복구한다. */
+  affection: number; // 0 ~ 100
+  personalFlags: Record<string, boolean>;
+}
+
+export interface PetNeedsState {
+  /** 펫 전용 성욕 수치. 연출 내용과 분리된 순수 상태값이다. */
+  desire: number;
+  /** 펫 전용 배설 욕구. 사람형 동료의 urinationUrge와 별도 관리한다. */
+  bathroomUrge: number;
+  desireTriggeredThresholds: number[];
+  bathroomTriggeredThresholds: number[];
+}
+
+export interface PetRelationshipState {
+  familiarity: number; // 0 ~ 100
+  loyalty: number; // 0 ~ 100
+}
+
+export type PetCareAction = 'PLAY' | 'GROOM' | 'TAME';
+
+export type PetGrade = 'COMMON' | 'UNCOMMON' | 'RARE' | 'EPIC' | 'LEGENDARY';
+
+export interface PetGrowthState {
+  grade: PetGrade;
+  level: number;
+  exp: number;
+  metabolismBoost: number; // 0~5, 기본 스탯 강화 + 배설 욕구 증가속도 상승
+}
+
+export interface PetActivityState {
+  lastCareDay: number;
+  dailyCareCounts: Partial<Record<PetCareAction, number>>;
+  totalCareCounts: Partial<Record<PetCareAction, number>>;
+  lastCommandDay?: number;
+  commandSuccesses: number;
+  commandFailures: number;
+  independentActions: number;
+}
+
+export interface PetRequestState {
+  activeNeed?: 'DESIRE' | 'BATHROOM';
+  threshold?: 30 | 50 | 70 | 100;
+  refusalCount: number;
+  createdAtDialogue?: number;
+  /** 수락/거절 등 플레이어 응답 전에는 동일 욕구 요청을 중복 생성하지 않는다. */
+  requestId?: string;
+}
+
+export interface PetState {
+  speciesId: PetSpeciesId;
+  category: PetSpeciesCategory;
+  /** 펫 고유 수치. 0은 길들여짐, 100은 매우 야생적임을 뜻한다. */
+  wildness: number;
+  relationship: PetRelationshipState;
+  growth: PetGrowthState;
+  needs: PetNeedsState;
+  requestState: PetRequestState;
+  activity: PetActivityState;
   personalFlags: Record<string, boolean>;
 }
 
@@ -738,8 +1056,13 @@ export interface CompanionNeedCue {
   id: string;
   companionId: string;
   companionName: string;
-  kind: 'DESIRE' | 'URINATION';
+  entityKind?: 'HUMANOID' | 'PET';
+  kind: 'DESIRE' | 'URINATION' | 'BATHROOM';
   threshold: 30 | 50 | 70 | 100;
+  /** PET 요청 큐에서만 사용한다. */
+  requestId?: string;
+  /** PET 요청이 반복 거절 한계에 도달했음을 나타내는 추상 이벤트. */
+  phase?: 'REQUEST' | 'ACCEPTED' | 'REFUSED' | 'REFUSAL_LIMIT';
   secondaryCompanionId?: string;
   createdAtDialogue: number;
 }
@@ -747,6 +1070,10 @@ export interface CompanionNeedCue {
 export interface CompanionData {
   id: string;
   name: string;
+  /** 3.3 상위 분류. 필드가 없는 구 세이브/구 데이터는 HUMANOID로 마이그레이션한다. */
+  kind?: CompanionKind;
+  /** PET일 때만 사용한다. 사람형 동료에서는 undefined를 유지한다. */
+  petState?: PetState;
   gender: string;
   /** 영입 동료는 성인으로 생성/마이그레이션한다. */
   physicalAge?: number;
@@ -796,6 +1123,17 @@ export interface CompanionData {
 // 메인 플레이어 상태 인터페이스
 // ============================================================
 
+export type DefeatAdultEventOutcome = 'SURVIVE' | 'CAPTURED' | 'RELOCATED' | 'CHAIN_ENCOUNTER' | 'GAME_OVER';
+export interface DefeatAdultEventRuntimeState {
+  active: boolean;
+  eventId: string;
+  sourceEnemyIds: string[];
+  sourceEnemyNames: string[];
+  startedAtDay: number;
+  startedAtHour: number;
+  startedAtMinute: number;
+}
+
 export type DefeatAftermathKind = 'SOLD_INTO_SLAVERY' | 'MONSTER_LAIR' | 'ABDUCTED' | 'ROBBED_AND_ABANDONED' | 'RESCUED' | 'DEATH';
 export interface DefeatAftermathState {
   id: string;
@@ -816,6 +1154,13 @@ export interface DragonkinState {
   hunterThreat: number;
   /** 용족 전용 사냥꾼 인카운터 누적 발생 횟수. */
   hunterEncounterCount: number;
+}
+
+export interface ActivePotionEffectState {
+  statusEffectId: string;
+  sourceItemId: string;
+  name: string;
+  remainingMinutes: number;
 }
 
 export interface PlayerState {
@@ -839,6 +1184,14 @@ export interface PlayerState {
   maxMana: number;
   rupees: number;
   inventory: InventoryItem[];
+  /** 4.0.2 상점 재고/단골/거래 중복 방지 상태. 구 세이브에서는 자동 생성된다. */
+  commerce?: CommerceRuntimeState;
+  /** 4.0.5 정착지 방문/은행/길드/암시장/경매/단골 상태. 구 세이브에서는 자동 확장된다. */
+  settlementState?: SettlementRuntimeState;
+  /** 비전투 물약의 시간제 효과. 게임 시간 경과와 함께 감소하며 세이브에 보존된다. */
+  activePotionEffects?: ActivePotionEffectState[];
+  /** 탐험용 독/출혈/질병 등 비전투 상태. 관련 치료 물약이 이 목록을 정식으로 해제한다. */
+  explorationConditions?: string[];
 
   // 1. 전투 및 전직 / 재능 시스템
   characterClass?: string;
@@ -857,7 +1210,11 @@ export interface PlayerState {
   /** 전투 UI에 실제 장착한 액티브 스킬. 미설정 시 learnedSkills 전체를 사용한다. */
   equippedCombatSkillIds?: string[];
   activeBattle?: BattleState | null;
-  /** 전투 패배 후 포획/납치/사망/전투 외 부활 처리 상태. */
+  /** 전투 패배 후 사용자 작성 성인 이벤트가 진행 중일 때의 런타임 상태. */
+  defeatAdultEvent?: DefeatAdultEventRuntimeState | null;
+  /** 체내 곤충/촉수 계통 정액에서 파생되는 현재 페로몬/잔향 상태. */
+  pheromoneState?: PheromoneState;
+  /** 전투 패배 후 기존 포획/납치/사망/전투 외 부활 처리 상태. */
   defeatAftermath?: DefeatAftermathState | null;
   /** 최근 전투/패배에서 등장한 몬스터. Gemini 몬스터별 참조용 단기 문맥. */
   recentMonsterContextIds?: string[];
@@ -869,6 +1226,10 @@ export interface PlayerState {
   // 2. 생활 직업 및 공통 기술 숙련 시스템 (Technology & Professions)
   professions: ProfessionProgress[];
   technologyState?: Record<string, any>;
+  /** @deprecated 구 세이브(v3.x 이전) 호환용 기술 상태 키. 로드 시 technologyState로 마이그레이션한다. */
+  technologies?: Record<string, any>;
+  /** 세력별 평판. 퀘스트 보상 reputationDelta의 실제 저장 위치. */
+  factionReputation?: Record<string, number>;
 
 
   // 3. 13개 슬롯 장비 시스템 (Equipment) 및 전용 가방 슬롯
@@ -883,6 +1244,8 @@ export interface PlayerState {
 
   // 5. 동료 시스템 (Companions)
   companions: CompanionData[];
+  /** 3.3: 플레이어의 전용 펫 장착 칸. 보유 중인 PET 하나만 지정할 수 있다. */
+  equippedPetId?: string | null;
   /** 다음 GM 로그에서 1회 소비되는 동료 욕구 임계 이벤트 큐. */
   companionNeedQueue: CompanionNeedCue[];
 
@@ -912,6 +1275,8 @@ export interface PlayerState {
   quests: Record<string, QuestProgress>;
   trackedQuestId?: string;
   declinedQuestIds?: string[];
+  /** 새 의뢰/목표 갱신/완료 등 사용자가 아직 확인하지 않은 퀘스트만 담는다. 단순 ACTIVE 상태는 알림이 아니다. */
+  questAlertQuestIds?: string[];
 
   // v1.0 전직/스킬트리/패시브 성장
   skillProgression: SkillProgressionState;
@@ -938,6 +1303,7 @@ restraints: Restraint[];
 adultNarrativeQueue: AdultNarrativeCue[];
 
 bodyPayloads: BodyPayloadEntry[];
+eggCohorts: EggCohort[];
 parasiteStates: ParasiteState[];
 bladderStatus: BladderStatus;
 pregnancy?: PregnancyState;
@@ -951,7 +1317,7 @@ export interface StateChanges {
   manaDelta?: number;
   rupeeDelta?: number;
   expGain?: number;
-  addItems?: Array<{ name: string; quantity: number; id?: string; equipmentId?: string; description?: string; category?: ItemCategory; quality?: 'POOR' | 'NORMAL' | 'FINE' | 'SUPERIOR' | 'MASTERWORK' }>;
+  addItems?: Array<{ name: string; quantity: number; id?: string; equipmentId?: string; bagId?: string; description?: string; category?: ItemCategory; quality?: 'POOR' | 'NORMAL' | 'FINE' | 'SUPERIOR' | 'MASTERWORK' }>;
   removeItems?: Array<{ name: string; quantity: number }>;
   companionNeedChanges?: Array<{ companionId: string; desireDelta?: number; urinationDelta?: number; relieveUrination?: boolean }>;
 
@@ -1026,10 +1392,16 @@ export interface RpgActionRequest {
 }
 
 export interface WorldAction {
-  type: 'TALK_CHARACTER' | 'MEET_CHARACTER' | 'ENTER_LOCATION';
+  type: 'TALK_CHARACTER' | 'MEET_CHARACTER' | 'ENTER_LOCATION' | 'MOVE_HEX';
   characterId?: string;
   characterName?: string;
   location?: string;
+  /** MOVE_HEX일 때 서버가 제공한 인접 Hex ID 중 하나. */
+  hexId?: string;
+  /** 4.0.1: 실제 월드 이동의 성격. */
+  movementType?: 'WALK' | 'RUN' | 'ESCAPE' | 'TRAVEL';
+  /** 4.0.1: 축 좌표 기준 이동 방향. */
+  direction?: 'E' | 'NE' | 'NW' | 'W' | 'SW' | 'SE' | 'UP' | 'DOWN' | 'LINK';
 }
 
 export interface LockActionRequest {
@@ -1086,6 +1458,7 @@ export type GameEventType =
   | 'PROFESSION_LEVEL_UP'
   | 'CAMP_FACILITY_BUILT'
   | 'CAMP_FACILITY_UPGRADED'
+  | 'CAMP_SLEEP'
   | 'COMPANION_BOND_CHANGED'
   | 'STAT_CHECK_RESOLVED'
   | 'WAYSTATION_USED'
@@ -1182,6 +1555,7 @@ export type ItemCategory =
   | 'EQUIPMENT'
   | 'KEY'
   | 'QUEST'
+  | 'MAP'
   | 'TOOL'
   | 'BOOK'
   | 'DOCUMENT'
@@ -1235,6 +1609,10 @@ export interface ItemDefinition {
     statBonus?: Partial<PlayerStats>;
     unlockBonus?: number;
   };
+  /** UI에 표시할 실제 사용처/용도 안내. */
+  usageHint?: string;
+  relatedQuestId?: string;
+  relatedLocationId?: string;
   useEffect?: {
     hpDelta?: number;
     mpDelta?: number;
@@ -1443,6 +1821,10 @@ export interface MajorCharacter {
   profession?: ProfessionType;
   combatClass?: CombatClassType;
   memoryFlags: Record<string, boolean>;
+  /** 실제로 플레이어가 이 인물과 조우한 적이 있는지. 주요 인물 UI 노출/상호작용의 기준입니다. */
+  hasMet?: boolean;
+  /** 이 인물이 마지막으로 플레이어와 실제 조우/대화한 월드 Hex. 원격 교류 방지에 사용합니다. */
+  currentHexId?: string;
   interactionHistory: Array<{ timestamp: number; summary: string }>;
   customQuestIds?: string[];
   /** 2.0 주요 인물 확장: 악의를 가지고 접근하거나 배신 가능성이 있는 인물. */
@@ -1566,7 +1948,7 @@ export interface QuestProgress {
   questId: string;
   status: QuestStatus;
   currentStageId: number;
-  objectives: Record<string, { currentCount: number; isCompleted: boolean }>;
+  objectives: Record<string, { currentCount: number; isCompleted: boolean; seenKeys?: string[] }>;
   startedAt?: number;
   completedAt?: number;
   failedAt?: number;

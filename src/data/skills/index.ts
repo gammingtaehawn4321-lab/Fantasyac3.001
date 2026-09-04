@@ -1805,6 +1805,41 @@ export const SKILL_DEFINITIONS: Record<string, SkillDefinition> = {
   },
 
   // ==============================
+  // 장비 전용 마법 — 장비 DB에서 참조하지만 정의가 누락되어 있던 3.2 복구 항목
+  // ==============================
+  cleric_purification: {
+    id: 'cleric_purification',
+    name: '정화',
+    description: '정화자의 홀리 케인에 새겨진 성광으로 아군 한 명의 해로운 상태를 씻고 방어를 돕습니다.',
+    type: 'ACTIVE',
+    cost: 14,
+    cooldown: 3,
+    requiredLevel: 5,
+    requiredClass: 'CLERIC',
+    effectId: 'EFFECT_PRIEST_PURIFYING_LIGHT',
+    actionDelay: 0.85,
+    targetType: 'ALLY',
+    iconName: 'Sparkles',
+  },
+  mage_starlight_singularity: {
+    id: 'mage_starlight_singularity',
+    name: '성광 특이점',
+    description: '비전 쌍성구만이 전개할 수 있는 별빛 특이점을 만들어 단일 적에게 응축된 비전 피해를 줍니다.',
+    type: 'ACTIVE',
+    cost: 26,
+    cooldown: 5,
+    requiredLevel: 10,
+    requiredClass: 'MAGE',
+    effectId: 'EFFECT_ARCANE_BURST',
+    actionDelay: 1.35,
+    targetType: 'ENEMY',
+    scalingStat: 'magic',
+    damageMultiplier: 3.0,
+    element: 'ARCANE',
+    iconName: 'Sparkles',
+  },
+
+  // ==============================
   // v1.0 유일 액티브 스킬 — 직업별 4종
   // 일반 레벨업으로는 습득할 수 없고 지역 보스/특수 인카운터/희귀 상점/초고난도 제작으로 획득한다.
   // ==============================

@@ -70,7 +70,7 @@ classes.forEach((classId,ci)=>{
   names.advanced.forEach((name,i)=>{
     const id=`${classId.toLowerCase()}_passive_advanced_${i+1}`;
     const statKeys=classId==='WARRIOR'?['physicalAttack','physicalDefense','actionSpeed']:classId==='ARCHER'?['criticalChance','accuracy','actionSpeed']:classId==='ROGUE'?['criticalDamage','evasion','physicalPenetration']:classId==='CLERIC'?['costRegen','magicDefense','statusResistance']:classId==='MAGE'?['magicAttack','magicPenetration','costRegen']:['actionSpeed','statusHitRate','costRegen'];
-    PASSIVE_DEFINITIONS_V1[id]={id,classId,name,grade:'ADVANCED',description:`기본 패시브의 조합식으로 합성하는 ${ko[classId]} 심화 패시브.`,maxLevel:20,effectPerLevel:{[statKeys[i] as any]: i===0?0.9:0.7}};
+    PASSIVE_DEFINITIONS_V1[id]={id,classId,name,grade:'ADVANCED',description:`기본 패시브의 조합식으로 합성하는 ${ko[classId]} 심화 패시브.`,maxLevel:20,effectPerLevel:{[statKeys[i] as any]: classId==='ROGUE'&&i===0?0.03:(i===0?0.9:0.7)}};
     PASSIVE_RECIPE_DEFINITIONS[`recipe_${id}`]={id:`recipe_${id}`,classId,resultPassiveId:id,requiredBaseCopies:[{passiveId:`${classId.toLowerCase()}_passive_basic_${(i%4)+1}`,copies:2},{passiveId:`${classId.toLowerCase()}_passive_basic_${((i+1)%4)+1}`,copies:2}],catalystName:'심화 패시브 촉매',grade:'ADVANCED'};
   });
   const uid=`${classId.toLowerCase()}_passive_unique_1`;
@@ -97,7 +97,7 @@ classes.forEach((classId)=>{
     {id:`${pfx}_active_b2`,classId,kind:'ACTIVE',grade:'BASIC',refId:b[1],name:'기본 액티브 II',description:'기본 전직 시 자동 습득.',x:72,y:22,prerequisiteNodeIds:[`${pfx}_root`]},
   ];
   for(let i=1;i<=4;i++) nodes.push({id:`${pfx}_passive_b${i}`,classId,kind:'PASSIVE',grade:'BASIC',refId:`${pfx}_passive_basic_${i}`,name:PASSIVE_NAMES[classId].basic[i-1],description:'해방석 중복으로 성장.',x:15+i*17,y:40+(i%2)*8,prerequisiteNodeIds:[i<=2?`${pfx}_active_b1`:`${pfx}_active_b2`]});
-  a.forEach((skillId,i)=>nodes.push({id:`${pfx}_active_a${i+1}`,classId,kind:'ACTIVE',grade:'ADVANCED',refId:skillId,name:`심화 액티브 ${i+1}`,description:'연결된 기본 액티브 Lv.20 달성 후 습득.',x:25+i*(50/Math.max(1,a.length-1)),y:63,prerequisiteNodeIds:[i%2===0?`${pfx}_active_b1`:`${pfx}_active_b2`],requiresSkillLevel:{skillId:b[i%2],level:20}}));
+  a.forEach((skillId,i)=>nodes.push({id:`${pfx}_active_a${i+1}`,classId,kind:'ACTIVE',grade:'ADVANCED',refId:skillId,name:`심화 액티브 ${i+1}`,description:'심화 전직 후 연결된 기본 액티브 Lv.20 달성 시 습득.',x:25+i*(50/Math.max(1,a.length-1)),y:63,prerequisiteNodeIds:[i%2===0?`${pfx}_active_b1`:`${pfx}_active_b2`],requiresAdvancedClass:true,requiresSkillLevel:{skillId:b[i%2],level:20}}));
   for(let i=1;i<=3;i++) nodes.push({id:`${pfx}_passive_a${i}`,classId,kind:'PASSIVE',grade:'ADVANCED',refId:`${pfx}_passive_advanced_${i}`,name:PASSIVE_NAMES[classId].advanced[i-1],description:'조합식 합성으로 제작/강화.',x:25+i*13,y:78,prerequisiteNodeIds:[`${pfx}_passive_b${i}`],requiresAdvancedClass:true});
   for(let i=1;i<=4;i++) nodes.push({id:`${pfx}_unique_${i}`,classId,kind:'ACTIVE',grade:'UNIQUE',refId:`${pfx}_unique_${i}`,name:`유일 액티브 ${i}`,description:'외부 콘텐츠에서 획득하면 나무에 접붙여진다.',x:12+i*18,y:94,prerequisiteNodeIds:[],requiresAdvancedClass:true});
   CLASS_SKILL_TREES[classId]=nodes;

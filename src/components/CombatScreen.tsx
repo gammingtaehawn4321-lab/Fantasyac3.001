@@ -70,6 +70,7 @@ interface CombatScreenProps {
     nextBattle?: BattleState
   ) => void;
   onSkillUsed?: (skillId: string) => void;
+  onPetCommandOutcome?: (petId: string, outcome: 'OBEY' | 'INDEPENDENT' | 'FAIL') => void;
   onBattleEnd: (
     outcome: 'VICTORY' | 'DEFEAT' | 'ESCAPED',
     rewards?: { exp: number; rupees: number; items?: any[] }
@@ -547,6 +548,7 @@ export const CombatScreen: React.FC<CombatScreenProps> = ({
   onConsumeCombatItem,
   onUpdateCompanionSettings,
   onSkillUsed,
+  onPetCommandOutcome,
   onBattleEnd,
 }) => {
   const [commandCategory, setCommandCategory] = useState<CommandCategory>(null);
@@ -966,6 +968,7 @@ export const CombatScreen: React.FC<CombatScreenProps> = ({
       if (cancelled) return;
 
       const result = processAutomaticTurn(battleState, playerState, plan);
+      if (plan.petCommandOutcome) onPetCommandOutcome?.(plan.actorId, plan.petCommandOutcome);
       const outcomeLogs = getCombatOutcomeLogs(result);
       const missed = outcomeLogs.length > 0 && outcomeLogs.every((log) => log.badge?.type === 'miss');
       setPresentation({ ...base, stage: 'IMPACT', hit: !missed });
@@ -1014,7 +1017,7 @@ export const CombatScreen: React.FC<CombatScreenProps> = ({
         <div className="line-clamp-2 text-[9px] leading-relaxed text-stone-400">{skill.description}</div>
         {!usability.usable && (
           <div className="mt-1 text-[8px] font-bold text-rose-400">
-            {usability.reason === 'NOT_ENOUGH_COST' ? '전투 자원 부족' : usability.reason === 'COOLDOWN' ? `쿨타임 ${usability.cooldownRemaining}` : '사용 불가'}
+            {usability.reason === 'NOT_ENOUGH_COST' ? '전투 자원 부족' : usability.reason === 'COOLDOWN' ? `쿨타임 ${usability.cooldownRemaining}` : usability.reason === 'EQUIPMENT_REQUIRED' ? '필요 무기 미장착' : '사용 불가'}
           </div>
         )}
       </button>

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { GameMessage, PlayerState, PlayerStats } from './types';
-import { extractCleanStory, normalizeNarrativeText } from './utils/narrativeSanitizer';
+import { extractCleanStory, normalizeNarrativeText, sanitizeGameStateForAI } from './utils/narrativeSanitizer';
 import {
   INITIAL_PLAYER_STATE,
   applyStateChanges,
@@ -26,19 +26,28 @@ import {
   transferItemFromCampStorage,
   setCompanionTactic,
   toggleCompanionActiveParty,
+  respondPetRequest,
+  careForPet,
+  feedPet,
+  setEquippedPet,
+  upgradePetMetabolismPerk,
+  recordPetBattleCommandOutcome,
   useInventoryItem,
   discardInventoryItem,
   removeItem,
   attemptUnlockLock,
   interactWithCharacter,
   enterLocation,
+  movePlayerByEncounter,
+  acknowledgeQuestAlerts,
   acceptQuest,
   declineQuest,
 } from './gameEngine';
 import { dispatchGameEvent } from './gameEvents';
-import { getRaceDefinition } from './data/raceData';
+import { buildRacePrologueText } from './data/raceNarrativeReferences';
 import { getFateDefinition } from './data/world/fateData';
 import { applyFateAction } from './data/world/fateSystem';
+import { applyFateContentHooks, activateQueuedFateEncounter } from './data/world/fateIntegration';
 import { StatusHeader } from './components/StatusHeader';
 import { StoryLog } from './components/StoryLog';
 import { ActionInput } from './components/ActionInput';
@@ -67,6 +76,7 @@ import { QuestModal } from './components/QuestModal';
 import { FateModal } from './components/FateModal';
 import { SkillTreeModal } from './components/SkillTreeModal';
 import { WorldMapModal } from './components/WorldMapModal';
+import { SettlementModal } from './components/SettlementModal';
 import { DungeonExplorerModal } from './components/DungeonExplorerModal';
 import { BattleState } from './combat/combatTypes';
 import type { RoutePreference } from './types';
@@ -76,63 +86,49 @@ import { X, Shield, AlertCircle, CheckCircle2, Info } from 'lucide-react';
 import { EquipmentSlot, EquipmentEnhancementMilestone, RunewordType } from './data/equipment';
 import { CampFacilityType } from './data/camp/campTypes';
 import { CompanionTactic } from './types';
-import { WORLD_HEX_TILES, revealAround, rollTravelStep, type WorldRouteResult } from './data/world/worldMapSystem';
-import { buildAirship, upgradeAirship, refuelAirship, consumeAirshipFuel, airshipFuelCostForDistance } from './data/world/lifeTravelSystem';
+import { WORLD_HEX_TILES, revealAround, type WorldRouteResult } from './data/world/worldMapSystem';
+import { buildAirship, upgradeAirship, refuelAirship } from './data/world/lifeTravelSystem';
 import { getWaystationAt, getWaystationDestination, rollWaystationSpecialEncounter, type WaystationRoute } from './data/world/waystationSystem';
 import { gatherLifeResources } from './data/world/gatheringSystem';
+import { getInnStayQuote, markSettlementVisited, recordInnStay, type InnRateDefinition } from './data/world/settlements';
 import { recruitMajorCharacter } from './data/characters/majorCharacterExpansion';
 import { mineWorldOreVein } from './data/world/miningSystem';
 import { getDungeonLayout, WORLD_DUNGEON_DATABASE } from './data/dungeons/dungeonSystem';
 import { REGIONAL_MONSTERS } from './data/world/monsterData';
-import { rollDragonkinHunterTravelEvent, markDragonkinHunterEvent } from './data/dragonkin/dragonkinEncounterSystem';
-import { getDefeatAftermathEffect, hasResurrectionPotion, rollDefeatAftermath } from './data/world/defeatEncounterSystem';
+import { getHostileSiteMonsterSlot } from './data/world/hostileSiteMonsterSlots';
+import { grantPetExperience } from './data/pets/petGrowth';
+import { getPetTameReferencePool, getPetUserReferencePool } from './data/pets/petEventReferences';
+import { getPetSpeciesDefinition } from './data/pets/petDatabase';
+import { markDragonkinHunterEvent } from './data/dragonkin/dragonkinEncounterSystem';
+import { getDefeatAftermathEffect, getResurrectionConsumable, hasResurrectionPotion, rollDefeatAftermath } from './data/world/defeatEncounterSystem';
+import { createDefeatAdultEventRuntime, resolveDefeatAdultEventOutcome, selectDefeatAdultEvent } from './data/world/defeatAdultEventSystem';
 import { RESURRECTION_POTION_NAME } from './data/world/monsterLootItems';
+import {
+  WORLD_TRAVEL_ENCOUNTER_ID,
+  anchorCurrentTravelEncounterToWorldHex,
+  attachTravelSession,
+  cancelTravelSession,
+  completeCurrentTravelEncounter,
+  createTravelSession,
+  getCurrentTravelEncounter,
+} from './data/world/travelSessionSystem';
 import { addSkillMastery, grantNextAdvancedPassiveRecipe, grantPassiveAwakeningStones, grantUniqueActive } from './data/progression/progressionSystem';
+import { requestNarration } from './services/narratorClient';
 import { UNIQUE_ACTIVE_SKILLS } from './data/progression/progressionData';
 import {
   checkAndMigrateLegacyLocalStorage,
   triggerDebouncedAutosave,
   GameSaveData,
 } from './services/saveService';
+import { requestInterpreterAction } from './services/interpreterClient';
 
 function generatePrologueMessage(state: PlayerState): GameMessage {
-  const raceDef = getRaceDefinition(state.race || 'HUMAN', state.beastkinType);
-  const charName = state.characterName || '모험가';
-  const raceTitle = raceDef.subName || raceDef.name;
-  const p = state.profile;
-  const genderStr = p?.gender ? ` (${p.gender})` : '';
-
-  let prologueText = '';
-
-  if (state.race === 'ELF') {
-    prologueText = `고대의 마력이 은은하게 일렁이는 신비로운 숲속, 나뭇잎 사이로 속삭이는 바람 소리와 함께 당신은 눈을 뜹니다.
-
-당신은 [${raceTitle}] ${charName}${genderStr}.
-${p?.hairColor ? `${p.hairColor} ${p.hairStyle}` : '단정한 머리칼'} 사이로 숲의 미풍이 스쳐 지나가며, 맑은 ${p?.eyeColor || '신비로운'} 눈동자에 은은한 햇살이 내려앉습니다. 손에는 낡은 가죽 주머니와 숲의 흙먼지가 묻어 있으며, 깊은 숲의 영험한 마력 감각이 온몸에 전해집니다.
-
-당신은 지금 무엇을 하시겠습니까?`;
-  } else if (state.race === 'BEASTKIN') {
-    const beastDetail =
-      state.beastkinType === 'BIRD'
-        ? p?.beastFeatures?.hasWings
-          ? `${p.beastFeatures.wingColor || ''} 날개와 깃털`
-          : '예리한 눈빛'
-        : `${p?.beastFeatures?.earColor || ''} ${p?.beastFeatures?.earDescription || '귀'}와 꼬리`;
-
-    prologueText = `거친 바람과 야생의 흙냄새가 코끝을 스치는 숲의 가장자리, 곤히 잠들었던 감각이 번쩍 깨어납니다.
-
-당신은 [${raceTitle}] ${charName}${genderStr}.
-${beastDetail}을 지닌 긍지 높은 수인 모험가로서 판타지악 대륙에 첫 발을 내디뎠습니다. ${p?.features ? `(${p.features}) ` : ''}손에는 낡은 가죽 주머니와 모험의 흔적이 남아 있습니다.
-
-당신은 지금 무엇을 하시겠습니까?`;
-  } else {
-    prologueText = `눈을 뜨자, 낯선 숲의 입구였습니다.
-
-당신은 [${raceTitle}] ${charName}${genderStr}.
-${p?.hairColor ? `${p.hairColor} ${p.hairStyle}` : '단정한 모습'}과 ${p?.build === 'SMALL' ? '날렵하고 작은' : p?.build === 'LARGE' ? '건장한' : '균형 잡힌'} 체격을 갖추고, 무한한 가능성과 호기심을 품은 채 판타지악 대륙에 첫 발을 내디뎠습니다.
-
-당신은 지금 무엇을 하시겠습니까?`;
-  }
+  let prologueText = buildRacePrologueText({
+    race: state.race,
+    beastkinType: state.beastkinType,
+    characterName: state.characterName,
+    profile: state.profile,
+  });
 
   const fateDef = getFateDefinition(state.fate?.fateId || '');
   if (fateDef) {
@@ -154,6 +150,26 @@ ${p?.hairColor ? `${p.hairColor} ${p.hairStyle}` : '단정한 모습'}과 ${p?.b
 import { BlacksmithWorkshopModal } from './components/BlacksmithWorkshopModal';
 import { AlchemyCraftingModal } from './components/AlchemyCraftingModal';
 
+
+function getNarratorLocationLabel(state: PlayerState): string {
+  const hexId = state.worldMap?.currentHexId;
+  const tile = hexId ? WORLD_HEX_TILES[hexId] : undefined;
+  if (!tile) return state.worldMap?.currentRegionId || '알 수 없는 지역';
+  return tile.locationName || tile.featureName || tile.sectorName || tile.regionId || tile.id;
+}
+
+function getNarratorTimeLabel(state: PlayerState): string {
+  const hour = String(typeof state.currentHour === 'number' ? state.currentHour : 8).padStart(2, '0');
+  const minute = String(typeof state.currentMinute === 'number' ? state.currentMinute : 0).padStart(2, '0');
+  return `Day ${state.dayCount || 1} · ${hour}:${minute}`;
+}
+
+function stringifySpeechStyle(state: PlayerState): string | undefined {
+  const style = state.profile?.speechStyle;
+  if (!style) return undefined;
+  return [style.description, style.tone, style.politeness, ...(style.quirks || [])].filter(Boolean).join(' / ') || undefined;
+}
+
 export default function App() {
 
   // Screen state: 'title' | 'game'
@@ -164,6 +180,8 @@ export default function App() {
   const [messages, setMessages] = useState<GameMessage[]>([generatePrologueMessage(INITIAL_PLAYER_STATE)]);
 
   const [isLoading, setIsLoading] = useState(false);
+  const [isPetInteractionLoading, setIsPetInteractionLoading] = useState(false);
+  const petInteractionLockRef = useRef(false);
 
   // Save Modal state
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
@@ -213,14 +231,22 @@ export default function App() {
   const [isAlchemyOpen, setIsAlchemyOpen] = useState(false);
 
   const [isCampOpen, setIsCampOpen] = useState(false);
+  const [campReturnTarget, setCampReturnTarget] = useState<'blacksmith' | 'alchemy' | 'professions' | 'companions' | null>(null);
   const [isCompanionsOpen, setIsCompanionsOpen] = useState(false);
   const [isMajorCharactersOpen, setIsMajorCharactersOpen] = useState(false);
   const [isQuestOpen, setIsQuestOpen] = useState(false);
   const [isFateOpen, setIsFateOpen] = useState(false);
   const [isSkillTreeOpen, setIsSkillTreeOpen] = useState(false);
   const [isWorldMapOpen, setIsWorldMapOpen] = useState(false);
+  const [activeSettlementId, setActiveSettlementId] = useState<string | undefined>(undefined);
+  const [isSettlementOpen, setIsSettlementOpen] = useState(false);
   const [isDungeonOpen, setIsDungeonOpen] = useState(false);
   const [activeDungeonId, setActiveDungeonId] = useState<string | undefined>(undefined);
+
+  const hasBlockingOverlay = isStatusOpen || isInternalStatusOpen || isStatsOpen || isTalentsOpen || isClassOpen ||
+    isInventoryOpen || isEquipmentOpen || isProfessionsOpen || isCraftingOpen || isBlacksmithOpen || isAlchemyOpen ||
+    isCampOpen || isCompanionsOpen || isMajorCharactersOpen || isQuestOpen || isFateOpen || isSkillTreeOpen ||
+    isWorldMapOpen || isSettlementOpen || isDungeonOpen || isSaveModalOpen || isCharacterCreationOpen || isNewGameOpen || isGameOverModalOpen;
 
   const isGameOver = playerState.hp <= 0 || playerState.sanity <= 0;
   const gameOverReason: 'hp' | 'sanity' = playerState.hp <= 0 ? 'hp' : 'sanity';
@@ -231,6 +257,12 @@ export default function App() {
       setIsGameOverModalOpen(true);
     }
   }, [isGameOver]);
+
+  useEffect(() => {
+    if (isQuestOpen && playerState.questAlertQuestIds?.length) {
+      setPlayerState((prev) => acknowledgeQuestAlerts(prev));
+    }
+  }, [isQuestOpen]);
 
   const handleSendAction = async (actionText: string) => {
     if (!actionText.trim() || isLoading || isGameOver) return;
@@ -257,28 +289,22 @@ export default function App() {
       const historyPayload = updatedMessages
         .slice(0, -1)
         .filter((m) => m.status !== 'error')
+        .slice(-12)
         .map((m) => ({
           role: (m.role === 'user' ? 'user' : 'model') as 'user' | 'model',
           content: m.content,
         }));
 
-      const res = await fetch('/api/rpg/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: actionText.trim(),
-          history: historyPayload,
-          playerState,
-        }),
+      const sanitizedStateForAI = sanitizeGameStateForAI(playerState);
+
+      const data = await requestInterpreterAction({
+        action: actionText.trim(),
+        history: historyPayload,
+        playerState: sanitizedStateForAI,
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || '게임 마스터와 연결하지 못했습니다.');
-      }
-
       // Handle world action (TALK_CHARACTER, MEET_CHARACTER, ENTER_LOCATION)
+      const wasTravelEncounterActionActive = playerState.activeEncounterId === WORLD_TRAVEL_ENCOUNTER_ID && Boolean(playerState.worldMap.travelSession?.active);
       let currentStateForChanges: PlayerState = {
         ...playerState,
         adultNarrativeQueue: [],
@@ -306,35 +332,64 @@ export default function App() {
         } else if (data.worldAction.type === 'ENTER_LOCATION' && data.worldAction.location) {
           const locRes = enterLocation(currentStateForChanges, data.worldAction.location);
           currentStateForChanges = locRes.nextState;
-          if (locRes.message) {
-            worldActionResultSummary.push(locRes.message);
-          }
+          if (locRes.message) worldActionResultSummary.push(locRes.message);
+        } else if (data.worldAction.type === 'MOVE_HEX') {
+          const moveRes = movePlayerByEncounter(
+            currentStateForChanges,
+            data.worldAction.hexId,
+            data.worldAction.location,
+            data.worldAction.movementType,
+            data.worldAction.direction,
+          );
+          if (moveRes.success) currentStateForChanges = moveRes.nextState;
+          if (moveRes.message) worldActionResultSummary.push(moveRes.message);
         }
       }
 
       // Handle active encounter resolution/failure if explicitly concluded by GM.
       let encounterResultSummary: string[] = [];
+      let resolvedTravelEncounter = false;
+      let resolvedDefeatAdultEventId: string | null = null;
+      const travelEncounterActionActive = currentStateForChanges.activeEncounterId === WORLD_TRAVEL_ENCOUNTER_ID && Boolean(currentStateForChanges.worldMap.travelSession?.active);
       if (data.encounterAction && currentStateForChanges.activeEncounterId) {
         const activeEncounterId = currentStateForChanges.activeEncounterId;
         const requestedId = data.encounterAction.encounterId || activeEncounterId;
         if (requestedId === activeEncounterId) {
-          const eventType = data.encounterAction.type === 'FAIL' ? 'ENCOUNTER_FAILED' : 'ENCOUNTER_RESOLVED';
-          const encounterRes = dispatchGameEvent(currentStateForChanges, eventType, {
-            encounterId: activeEncounterId,
-            encounterOutcome: data.encounterAction.outcome || data.encounterAction.type,
-          });
-          currentStateForChanges = encounterRes.nextState;
-          encounterResultSummary.push(...encounterRes.messages);
+          const isTravelEncounter = travelEncounterActionActive;
+          // 여행 사건이 전투로 이어질 때는 전투가 끝나기 전까지 해당 여행 인카운터를 유지한다.
+          const travelBattlePending = isTravelEncounter && Boolean(data.changes?.battleTrigger);
+          if (!travelBattlePending) {
+            const defeatAdultEventActive = Boolean(currentStateForChanges.defeatAdultEvent?.active && currentStateForChanges.defeatAdultEvent.eventId === activeEncounterId);
+            const eventType = data.encounterAction.type === 'FAIL' ? 'ENCOUNTER_FAILED' : 'ENCOUNTER_RESOLVED';
+            const encounterRes = dispatchGameEvent(currentStateForChanges, eventType, {
+              encounterId: activeEncounterId,
+              encounterOutcome: data.encounterAction.outcome || data.encounterAction.type,
+            });
+            currentStateForChanges = encounterRes.nextState;
+            encounterResultSummary.push(...encounterRes.messages);
+            resolvedTravelEncounter = isTravelEncounter;
+            if (defeatAdultEventActive) {
+              // 장면에서 반환한 body/payload/시간 변화까지 먼저 적용한 뒤 패배 결과를 최종 확정한다.
+              // GAME_OVER 결과가 GM의 hpDelta 등에 의해 뒤집히는 것을 방지하기 위해 여기서는 ID만 기억한다.
+              resolvedDefeatAdultEventId = activeEncounterId;
+            } else if (!isTravelEncounter) {
+              const queuedFateEncounter = activateQueuedFateEncounter(currentStateForChanges);
+              currentStateForChanges = queuedFateEncounter.nextState;
+              encounterResultSummary.push(...queuedFateEncounter.messages);
+            }
+          }
         }
       }
 
       // Handle fate progression only when the GM explicitly reports a meaningful current-fate resolution.
       let fateResultSummary: string[] = [];
       if (data.fateAction && data.fateAction.type && currentStateForChanges.fate) {
+        const beforeFateState = currentStateForChanges;
         const fateRes = applyFateAction(currentStateForChanges, data.fateAction);
         if (fateRes.success) {
-          currentStateForChanges = fateRes.nextState;
-          fateResultSummary.push(...fateRes.messages);
+          const integrated = applyFateContentHooks(beforeFateState, fateRes.nextState);
+          currentStateForChanges = integrated.nextState;
+          fateResultSummary.push(...fateRes.messages, ...integrated.messages);
         }
       }
 
@@ -364,8 +419,9 @@ export default function App() {
         }
       }
 
-      const timeDeltaMinutes =
-        typeof data.changes?.timeDeltaMinutes === 'number'
+      const timeDeltaMinutes = wasTravelEncounterActionActive
+        ? 0 // 여행 중 사건의 시간은 TravelSession이 현재 인카운터의 몫만 별도로 진행한다.
+        : typeof data.changes?.timeDeltaMinutes === 'number'
           ? Math.min(1440, Math.max(1, Math.floor(data.changes.timeDeltaMinutes)))
           : DEFAULT_ACTION_TIME_MINUTES;
 
@@ -379,7 +435,20 @@ export default function App() {
         safeChangesWithTime
       );
 
-      const finalState = applyStoryLogProgress(nextState);
+      let finalState = applyStoryLogProgress(nextState);
+      let pendingGameOverModalState: boolean | null = null;
+      if (resolvedDefeatAdultEventId) {
+        finalState = resolveDefeatAdultEventOutcome(finalState, resolvedDefeatAdultEventId);
+        encounterResultSummary.push(`패배 후 이벤트 결과가 적용되었습니다: ${resolvedDefeatAdultEventId}`);
+        // Narrator 로그까지 성공한 뒤 UI/상태를 한 번에 커밋한다.
+        pendingGameOverModalState = finalState.hp <= 0 || finalState.sanity <= 0;
+      }
+      let travelContinuationMessages: GameMessage[] = [];
+      if (resolvedTravelEncounter) {
+        const continuation = advanceTravelAndActivateNext(finalState);
+        finalState = continuation.nextState;
+        travelContinuationMessages = continuation.messages;
+      }
 
       const allChangeLogs = [...worldActionResultSummary, ...encounterResultSummary, ...fateResultSummary, ...lockResultSummary, ...(changeSummary || [])];
 
@@ -388,9 +457,45 @@ export default function App() {
         ? data.changes.battleTrigger
         : undefined;
 
-      setPlayerState(finalState);
+      const interpreterSummary = extractCleanStory(data.story);
+      const lockedFacts = [
+        `플레이어가 다음 행동을 시도했다: ${actionText.trim()}`,
+        interpreterSummary ? `Gemini 행동 해석 요약: ${interpreterSummary}` : '',
+        ...allChangeLogs.map((line) => `게임 엔진 확정: ${line}`),
+        pendingBattleForMessage ? '게임 엔진 확정: 이 행동 이후 전투가 시작될 예정이다.' : '',
+        data.statCheck?.success === true ? '게임 엔진 확정: 스탯 판정에 성공했다.' : '',
+        data.statCheck?.success === false ? '게임 엔진 확정: 스탯 판정에 실패했다.' : '',
+      ].filter(Boolean);
 
-      const cleanStory = extractCleanStory(data.story);
+      const narration = await requestNarration({
+        requestId: `rpg-${Date.now()}`,
+        locale: 'ko-KR',
+        sceneType: 'RPG_ACTION',
+        playerAction: actionText.trim(),
+        interpreterSummary,
+        currentLocation: getNarratorLocationLabel(finalState),
+        currentTime: getNarratorTimeLabel(finalState),
+        participants: [
+          {
+            id: 'player',
+            name: finalState.characterName || finalState.profile?.inGameName || '모험가',
+            role: '주인공',
+            speechStyle: stringifySpeechStyle(finalState),
+          },
+        ],
+        lockedFacts,
+        recentLog: updatedMessages
+          .filter((m) => m.role !== 'user' && m.status !== 'error')
+          .slice(-6)
+          .map((m) => m.content),
+        desiredLength: 'LONG',
+      });
+
+      const cleanStory = normalizeNarrativeText(narration.text);
+
+      // Interpreter -> Engine -> Narrator가 모두 성공한 뒤에만 실제 상태를 커밋한다.
+      setPlayerState(finalState);
+      if (pendingGameOverModalState !== null) setIsGameOverModalOpen(pendingGameOverModalState);
 
       const gmMessage: GameMessage = {
         id: `gm-${Date.now()}`,
@@ -403,7 +508,7 @@ export default function App() {
         statCheckResult: data.statCheck,
       };
 
-      const newMsgList = [...updatedMessages, gmMessage];
+      const newMsgList = [...updatedMessages, gmMessage, ...travelContinuationMessages];
 
       if (levelUpMessage) {
         newMsgList.push({
@@ -493,7 +598,7 @@ export default function App() {
   ) => {
     setPlayerState((prev) => {
       const removed = removeItem(prev.inventory, itemNameOrId, quantity);
-      return {
+      let next: PlayerState = {
         ...prev,
         hp: nextBattle.player.hp,
         mana: nextBattle.player.mp,
@@ -511,6 +616,15 @@ export default function App() {
         }),
         activeBattle: nextBattle,
       };
+      if (removed.removedQuantity > 0) {
+        const consumedItem = prev.inventory.find((item) => item.id === itemNameOrId || item.name === itemNameOrId);
+        next = dispatchGameEvent(next, 'ITEM_USED', {
+          itemId: consumedItem?.id,
+          itemName: consumedItem?.name || itemNameOrId,
+          quantity: removed.removedQuantity,
+        }).nextState;
+      }
+      return next;
     });
   };
 
@@ -582,11 +696,125 @@ export default function App() {
     return lines;
   };
 
+  const activateCurrentTravelEncounter = (baseState: PlayerState): { nextState: PlayerState; message?: GameMessage; movedToHexId?: string; fuelSpent?: number } => {
+    const anchored = anchorCurrentTravelEncounterToWorldHex(baseState);
+    const anchoredState = anchored.nextState;
+    const unit = getCurrentTravelEncounter(anchoredState);
+    const session = anchoredState.worldMap.travelSession;
+    if (!unit || !session?.active) return { nextState: anchoredState, movedToHexId: anchored.movedToHexId, fuelSpent: anchored.fuelSpent };
+
+    let next = unit.dragonkinHunter ? markDragonkinHunterEvent(anchoredState) : anchoredState;
+    const progressLabel = `${unit.index + 1}/${session.encounters.length}`;
+    const tile = WORLD_HEX_TILES[unit.tileId];
+
+    if (unit.kind === 'MONSTER' && unit.monsterId) {
+      const def = REGIONAL_MONSTERS.find((m) => m.id === unit.monsterId);
+      const hostileDef = !def ? getHostileSiteMonsterSlot(unit.monsterId) : undefined;
+      const hostileSubtype = hostileDef?.hostileSiteKind === 'INSECT_COLONY' ? 'INSECTOID' : hostileDef?.hostileSiteKind === 'TENTACLE_RAID_SITE' ? 'TENTACLE' : undefined;
+      const enemy = createEnemyActor({
+        templateId: def?.id || hostileDef?.id || unit.monsterId,
+        name: def?.name || hostileDef?.name || unit.monsterName || '여행 중의 적',
+        level: Math.max(def?.minLevel || hostileDef?.minLevel || 1, Math.min(def?.maxLevel || hostileDef?.maxLevel || next.level, next.level)),
+        tier: tile?.layerBossId === def?.id ? 'BOSS' : (def?.tier || hostileDef?.tier || 'NORMAL'),
+        skills: def?.skills || hostileDef?.skills,
+        personality: def?.personality || hostileDef?.personality,
+        race: def?.raceType === 'HUMANOID'
+          ? (def.raceSubtype.startsWith('BEASTKIN_') ? 'BEASTKIN' : def.raceSubtype === 'ELF' ? 'ELF' : 'HUMAN')
+          : 'MONSTER',
+        traits: (() => {
+          const baseTraits = def ? [def.raceType, def.raceSubtype, ...(def.tier === 'ELITE' ? ['ELITE'] : [])] : hostileDef ? ['ABERRANT', hostileSubtype || 'ABERRANT', 'HOSTILE_SITE', ...(hostileDef.tier === 'ELITE' ? ['ELITE'] : []), ...hostileDef.tags] : [];
+          if (tile?.layer === 'UNDERGROUND') baseTraits.push('UNDERGROUND');
+          if (tile?.layer === 'DEEP_UNDERGROUND') baseTraits.push('DEEP_UNDERGROUND');
+          if (tile?.layerBossId === def?.id) {
+            baseTraits.push('REGIONAL_BOSS', 'UNDERGROUND_LAYER_BOSS');
+            if (tile.layerBossClearFlag) baseTraits.push(`CLEAR_FLAG:${tile.layerBossClearFlag}`);
+          }
+          return baseTraits;
+        })(),
+      });
+      next = {
+        ...next,
+        activeEncounterId: null,
+        activeBattle: initBattleState(next, [enemy], {
+          name: `${tile?.sectorName || tile?.regionId || '여행 경로'} · ${tile?.terrain || 'UNKNOWN'}`,
+          description: `목적지까지 이동하는 중 발생한 여행 인카운터 ${progressLabel}.`,
+        }),
+      };
+      return {
+        nextState: next,
+        message: {
+          id: `travel-encounter-${Date.now()}`,
+          role: 'system',
+          content: `🧭 [여행 인카운터 ${progressLabel}]
+${unit.title}
+${unit.summary}
+• 전투를 해결하면 여행이 계속됩니다.`,
+          timestamp: Date.now(),
+        },
+        movedToHexId: anchored.movedToHexId,
+        fuelSpent: anchored.fuelSpent,
+      };
+    }
+
+    const started = dispatchGameEvent(next, 'ENCOUNTER_STARTED', { encounterId: WORLD_TRAVEL_ENCOUNTER_ID });
+    next = started.nextState;
+    return {
+      nextState: next,
+      message: {
+        id: `travel-encounter-${Date.now()}`,
+        role: 'system',
+        content: `🧭 [여행 인카운터 ${progressLabel}]
+${unit.title}
+${unit.summary}
+• 행동을 입력해 이 사건을 해결하세요.`,
+        timestamp: Date.now(),
+      },
+      movedToHexId: anchored.movedToHexId,
+      fuelSpent: anchored.fuelSpent,
+    };
+  };
+
+  const advanceTravelAndActivateNext = (baseState: PlayerState): { nextState: PlayerState; messages: GameMessage[] } => {
+    const advanced = completeCurrentTravelEncounter(baseState);
+    let next = advanced.nextState;
+    const travelMessages: GameMessage[] = [];
+
+    if (advanced.arrived) {
+      const destination = WORLD_HEX_TILES[next.worldMap.currentHexId];
+      travelMessages.push({
+        id: `travel-arrival-${Date.now() + 1}`,
+        role: 'system',
+        content: `📍 [목적지 도착]
+${destination?.locationName || destination?.featureName || destination?.sectorName || next.worldMap.currentHexId}에 도착했습니다.`,
+        timestamp: Date.now() + 1,
+      });
+      return { nextState: next, messages: travelMessages };
+    }
+
+    const activated = activateCurrentTravelEncounter(next);
+    next = activated.nextState;
+    if (activated.movedToHexId) {
+      const movedTile = WORLD_HEX_TILES[activated.movedToHexId];
+      travelMessages.push({
+        id: `travel-step-${Date.now()}`,
+        role: 'system',
+        content: `🗺️ [여행 진행]
+${movedTile?.locationName || movedTile?.sectorName || '다음 Hex'}에 실제로 진입했습니다.${(activated.fuelSpent || 0) > 0 ? `
+• 비행정 연료 ${activated.fuelSpent} 소비` : ''}`,
+        timestamp: Date.now(),
+      });
+    }
+    if (activated.message) travelMessages.push(activated.message);
+    return { nextState: next, messages: travelMessages };
+  };
+
   const handleBattleEnd = (
     outcome: 'VICTORY' | 'DEFEAT' | 'ESCAPED',
     rewards?: { exp: number; rupees: number; items?: any[]; breakdown?: any[] }
   ) => {
     const finishedBattle = playerState.activeBattle;
+    const travelUnitAtBattleStart = getCurrentTravelEncounter(playerState);
+    const travelWasActive = Boolean(playerState.worldMap.travelSession?.active && travelUnitAtBattleStart);
     const rewardPayload = rewards || { exp: 0, rupees: 0, items: [] };
     const rewardApplied = applyStateChanges(playerState, {
       expGain: rewardPayload.exp || 0,
@@ -663,12 +891,30 @@ export default function App() {
         };
       }
     }
+    let petGrowthMessages: string[] = [];
+    if (outcome === 'VICTORY' && rewardPayload.exp > 0) {
+      const petGrowth = grantPetExperience(processedState, Math.max(1, Math.floor(rewardPayload.exp * 0.75)));
+      processedState = petGrowth.nextState;
+      petGrowthMessages = petGrowth.messages;
+    }
     const rewardLines = formatCombatRewardLines(rewardPayload);
 
     if (outcome === 'VICTORY') {
       const wonEv = dispatchGameEvent(processedState, 'BATTLE_WON', {});
       processedState = wonEv.nextState;
-      const clearedState: PlayerState = { ...processedState, activeBattle: null, defeatAftermath: null };
+      let clearedState: PlayerState = { ...processedState, activeBattle: null, defeatAftermath: null };
+      let travelBattleMessages: GameMessage[] = [];
+      if (travelWasActive) {
+        if (clearedState.activeEncounterId === WORLD_TRAVEL_ENCOUNTER_ID) {
+          clearedState = dispatchGameEvent(clearedState, 'ENCOUNTER_RESOLVED', {
+            encounterId: WORLD_TRAVEL_ENCOUNTER_ID,
+            encounterOutcome: 'BATTLE_VICTORY',
+          }).nextState;
+        }
+        const continued = advanceTravelAndActivateNext(clearedState);
+        clearedState = continued.nextState;
+        travelBattleMessages = continued.messages;
+      }
       setPlayerState(clearedState);
       if (shouldReopenDungeon && reopenDungeonId) {
         setActiveDungeonId(reopenDungeonId);
@@ -678,10 +924,10 @@ export default function App() {
       const victoryMsg: GameMessage = {
         id: `vic-${Date.now()}`,
         role: 'gm',
-        content: `⚔️ [전투 승리]\n치열한 혈투 끝에 모든 적을 쓰러뜨렸습니다!${rewardLines.length ? `\n• ${rewardLines.join('\n• ')}` : ''}${progression.progressionRewardLines.length ? `\n• ${progression.progressionRewardLines.join('\n• ')}` : ''}`,
+        content: `⚔️ [전투 승리]\n치열한 혈투 끝에 모든 적을 쓰러뜨렸습니다!${rewardLines.length ? `\n• ${rewardLines.join('\n• ')}` : ''}${progression.progressionRewardLines.length ? `\n• ${progression.progressionRewardLines.join('\n• ')}` : ''}${petGrowthMessages.length ? `\n• ${petGrowthMessages.join('\n• ')}` : ''}`,
         timestamp: Date.now(),
       };
-      const nextMsgs = [...messages, victoryMsg];
+      const nextMsgs = [...messages, victoryMsg, ...travelBattleMessages];
       if (rewardApplied.levelUpMessage) nextMsgs.push({ id: `lvl-${Date.now()}`, role: 'system', content: rewardApplied.levelUpMessage, timestamp: Date.now() + 1 });
       setMessages(nextMsgs);
       triggerAutosave(clearedState, nextMsgs);
@@ -689,7 +935,23 @@ export default function App() {
     }
 
     if (outcome === 'ESCAPED') {
-      const clearedState: PlayerState = { ...processedState, activeBattle: null, defeatAftermath: null };
+      let clearedState: PlayerState = { ...processedState, activeBattle: null, defeatAftermath: null };
+      let travelBattleMessages: GameMessage[] = [];
+      if (travelWasActive) {
+        if (clearedState.activeEncounterId === WORLD_TRAVEL_ENCOUNTER_ID) {
+          clearedState = dispatchGameEvent(clearedState, 'ENCOUNTER_RESOLVED', {
+            encounterId: WORLD_TRAVEL_ENCOUNTER_ID,
+            encounterOutcome: 'BATTLE_ESCAPED',
+          }).nextState;
+        }
+        clearedState = cancelTravelSession(clearedState);
+        travelBattleMessages = [{
+          id: `travel-interrupted-${Date.now()}`,
+          role: 'system',
+          content: `🗺️ [여행 중단]\n도주로 인해 기존 목적지 경로가 해제되었습니다. 현재 월드 Hex에서 다시 경로를 선택할 수 있습니다.`,
+          timestamp: Date.now(),
+        }];
+      }
       setPlayerState(clearedState);
       const escapeMsg: GameMessage = {
         id: `esc-${Date.now()}`,
@@ -697,7 +959,7 @@ export default function App() {
         content: `💨 [도주 성공]\n적의 공격 범위를 벗어나 후퇴했습니다.${rewardLines.length ? `\n\n[처치 결산]\n• ${rewardLines.join('\n• ')}` : ''}`,
         timestamp: Date.now(),
       };
-      const nextMsgs = [...messages, escapeMsg];
+      const nextMsgs = [...messages, escapeMsg, ...travelBattleMessages];
       if (rewardApplied.levelUpMessage) nextMsgs.push({ id: `lvl-${Date.now()}`, role: 'system', content: rewardApplied.levelUpMessage, timestamp: Date.now() + 1 });
       setMessages(nextMsgs);
       triggerAutosave(clearedState, nextMsgs);
@@ -707,6 +969,36 @@ export default function App() {
     if (outcome === 'DEFEAT') {
       const lostEv = dispatchGameEvent(processedState, 'BATTLE_LOST', {});
       processedState = lostEv.nextState;
+
+      // 사용자 작성 패배 후 성인 이벤트가 활성/완성되어 있으면 기존 즉시 사망/사후 처리보다 먼저 라우팅한다.
+      // 슬롯이 비어 있거나 disabled면 기존 패배 시스템으로 그대로 폴백한다.
+      const defeatAdultEvent = finishedBattle ? selectDefeatAdultEvent(processedState, finishedBattle) : undefined;
+      if (defeatAdultEvent && finishedBattle) {
+        let routed: PlayerState = {
+          ...processedState,
+          hp: Math.max(1, processedState.hp),
+          activeBattle: null,
+          defeatAftermath: null,
+          defeatAdultEvent: createDefeatAdultEventRuntime(processedState, finishedBattle, defeatAdultEvent.id),
+        };
+        if (travelWasActive) routed = cancelTravelSession(routed);
+        const started = dispatchGameEvent(routed, 'ENCOUNTER_STARTED', { encounterId: defeatAdultEvent.id });
+        routed = { ...started.nextState, defeatAdultEvent: routed.defeatAdultEvent };
+        setPlayerState(routed);
+        setIsGameOverModalOpen(false);
+        const defeatMsg: GameMessage = {
+          id: `defeat-adult-${Date.now()}`,
+          role: 'system',
+          content: `☠️ [전투 패배]
+패배 후 전용 이벤트가 발생했습니다. 행동을 입력해 현재 사건을 진행하세요.${travelWasActive ? '\n진행 중이던 여행은 현재 위치에서 중단되었습니다.' : ''}`,
+          timestamp: Date.now(),
+        };
+        const nextMsgs = [...messages, defeatMsg];
+        setMessages(nextMsgs);
+        triggerAutosave(routed, nextMsgs);
+        return;
+      }
+
       const aftermath = finishedBattle
         ? rollDefeatAftermath(processedState, finishedBattle)
         : { id: `defeat_${Date.now()}`, kind: 'DEATH' as const, title: '패배의 끝 · 사망', description: '전투에서 입은 상처를 버티지 못했다.', sourceEnemyIds: [], sourceEnemyNames: [], canSkipBattle: true, blockedByEliteOrBoss: false, canUseResurrectionPotion: hasResurrectionPotion(processedState), resolved: false };
@@ -719,10 +1011,12 @@ export default function App() {
           sanity: Math.max(1, Math.min(processedState.maxSanity, processedState.sanity + effect.sanityDelta)),
           rupees: Math.max(0, Math.round(processedState.rupees * (1 - effect.rupeeLossRatio))),
           activeBattle: null,
+          defeatAdultEvent: null,
           defeatAftermath: aftermath,
           storyFlags: Array.from(new Set([...(processedState.storyFlags || []), `DEFEAT_AFTERMATH_${aftermath.kind}`])),
         };
         recovered = advanceGameTime(recovered, effect.timeMinutes);
+        if (travelWasActive) recovered = cancelTravelSession(recovered);
 
         if (effect.loseRandomNonKeyItem) {
           const losable = recovered.inventory.find((item) => item.quantity > 0 && item.category !== 'KEY' && item.category !== 'QUEST' && !item.name.includes('열쇠') && !item.name.includes('허가증'));
@@ -734,7 +1028,7 @@ export default function App() {
         const defeatMsg: GameMessage = {
           id: `defeat-${Date.now()}`,
           role: 'gm',
-          content: `☠️ [전투 패배]\n전투 결과는 패배로 확정되었습니다.${rewardLines.length ? `\n\n[처치 결산]\n• ${rewardLines.join('\n• ')}` : ''}\n\n[${aftermath.title}]\n${aftermath.description}`,
+          content: `☠️ [전투 패배]\n전투 결과는 패배로 확정되었습니다.${rewardLines.length ? `\n\n[처치 결산]\n• ${rewardLines.join('\n• ')}` : ''}\n\n[${aftermath.title}]\n${aftermath.description}${travelWasActive ? '\n\n🗺️ 진행 중이던 여행은 현재 위치에서 중단되었습니다.' : ''}`,
           timestamp: Date.now(),
         };
         const nextMsgs = [...messages, defeatMsg];
@@ -744,7 +1038,8 @@ export default function App() {
         return;
       }
 
-      const deadState: PlayerState = { ...processedState, hp: 0, activeBattle: null, defeatAftermath: aftermath };
+      let deadState: PlayerState = { ...processedState, hp: 0, activeBattle: null, defeatAdultEvent: null, defeatAftermath: aftermath };
+      if (travelWasActive) deadState = cancelTravelSession(deadState);
       setPlayerState(deadState);
       setIsGameOverModalOpen(true);
       const deathMsg: GameMessage = {
@@ -768,10 +1063,13 @@ export default function App() {
   const handleUseResurrectionPotion = () => {
     const aftermath = playerState.defeatAftermath;
     if (!aftermath || aftermath.kind !== 'DEATH' || aftermath.blockedByEliteOrBoss || !aftermath.canUseResurrectionPotion || !hasResurrectionPotion(playerState)) return;
-    const removed = removeItem(playerState.inventory, RESURRECTION_POTION_NAME, 1);
+    const resurrectionItem = getResurrectionConsumable(playerState);
+    if (!resurrectionItem) return;
+    const removed = removeItem(playerState.inventory, resurrectionItem.itemId || resurrectionItem.name, 1);
+    if (removed.removedQuantity <= 0) return;
     let revived: PlayerState = {
       ...playerState,
-      hp: Math.max(1, Math.round(playerState.maxHp * 0.35)),
+      hp: Math.max(1, Math.round(playerState.maxHp * resurrectionItem.hpRatio)),
       sanity: Math.max(Math.round(playerState.maxSanity * 0.25), playerState.sanity),
       inventory: removed.inventory,
       activeBattle: null,
@@ -779,12 +1077,17 @@ export default function App() {
       storyFlags: Array.from(new Set([...(playerState.storyFlags || []), 'USED_RESURRECTION_POTION_AFTER_DEFEAT'])),
     };
     revived = advanceGameTime(revived, 60);
+    revived = dispatchGameEvent(revived, 'ITEM_USED', {
+      itemId: resurrectionItem.itemId,
+      itemName: resurrectionItem.name,
+      quantity: removed.removedQuantity,
+    }).nextState;
     setPlayerState(revived);
     setIsGameOverModalOpen(false);
     const msg: GameMessage = {
       id: `revive-outside-${Date.now()}`,
       role: 'gm',
-      content: `🧪 [부활의 물약]\n전투의 패배 자체는 되돌리지 않았습니다. 물약의 힘으로 마지막 순간 전장에서 이탈해 목숨을 건졌습니다.\n• HP ${revived.hp}/${revived.maxHp}\n• ${RESURRECTION_POTION_NAME} x1 소모`,
+      content: `🧪 [${resurrectionItem.name}]\n전투의 패배 자체는 되돌리지 않았습니다. 물약의 힘으로 마지막 순간 전장에서 이탈해 목숨을 건졌습니다.\n• HP ${revived.hp}/${revived.maxHp}\n• ${resurrectionItem.name} x1 소모`,
       timestamp: Date.now(),
     };
     const nextMsgs = [...messages, msg];
@@ -796,126 +1099,85 @@ export default function App() {
     setPlayerState((prev) => addSkillMastery(prev, skillId, 1));
   };
 
+  const handleEnterSettlement = (settlementId: string) => {
+    const next = sanitizePlayerState(markSettlementVisited(playerState, settlementId));
+    setPlayerState(next);
+    setActiveSettlementId(settlementId);
+    setIsWorldMapOpen(false);
+    setIsSettlementOpen(true);
+    triggerAutosave(next, messages);
+  };
+
+  const handleStayAtInn = (rate: InnRateDefinition) => {
+    if (!activeSettlementId) { showToast('현재 정착지 정보를 찾을 수 없습니다.', 'error'); return; }
+    const quote = getInnStayQuote(playerState, activeSettlementId, rate);
+    if (playerState.rupees < quote.price) { showToast('루피가 부족합니다.', 'error'); return; }
+    let next = advanceGameTime({ ...playerState, rupees: playerState.rupees - quote.price }, rate.minutes);
+    const ratio = Math.max(0, Math.min(1, rate.recoveryRatio));
+    next = {
+      ...next,
+      hp: Math.min(next.maxHp, Math.max(next.hp, Math.round(next.hp + (next.maxHp - next.hp) * ratio))),
+      sanity: Math.min(next.maxSanity, Math.max(next.sanity, Math.round(next.sanity + (next.maxSanity - next.sanity) * ratio))),
+      mana: Math.min(next.maxMana, Math.max(next.mana, Math.round(next.mana + (next.maxMana - next.mana) * ratio))),
+    };
+    next = recordInnStay(next, activeSettlementId);
+    next = sanitizePlayerState(next);
+    setPlayerState(next);
+    showToast(`${rate.name}에서 휴식했습니다.${quote.discountRate > 0 ? ` 단골 할인 ${Math.round(quote.discountRate * 100)}% 적용.` : ''}`, 'success');
+    triggerAutosave(next, messages);
+  };
+
   const handleWorldRoutePreference = (preference: RoutePreference) => {
     setPlayerState((prev) => ({ ...prev, worldMap: { ...prev.worldMap, routePreference: preference } }));
   };
 
   const handleWorldTravel = (route: WorldRouteResult) => {
     if (!route.found || route.tileIds.length < 2) return;
-    // 계획 경로 전체가 아니라 실제로 이동한 구간만 정산한다.
-    // 중도 몬스터 조우 시 이동거리·비행정 연료가 과다 차감되는 문제를 방지한다.
-    let next = playerState;
-    const travelLogs: string[] = [];
-    let monsterEncounter: { name: string; id: string } | null = null;
-    let traveledSteps = 0;
-    let traveledSkyTiles = 0;
-    let traveledCelestialTiles = 0;
-
-    for (let index = 1; index < route.tileIds.length; index += 1) {
-      const tile = WORLD_HEX_TILES[route.tileIds[index]];
-      if (!tile) continue;
-      traveledSteps += 1;
-      if (tile.layer === 'SKY') traveledSkyTiles += 1;
-      if (tile.layer === 'CELESTIAL') traveledCelestialTiles += 1;
-      const step = rollTravelStep(next, tile, index + next.dayCount * 97);
-      next = advanceGameTime(next, step.minutes);
-      next = {
-        ...next,
-        worldMap: {
-          ...next.worldMap,
-          currentHexId: tile.id,
-          currentRegionId: tile.regionId,
-          currentLayer: tile.layer,
-          exploredHexIds: Array.from(new Set([...(next.worldMap.exploredHexIds || []), tile.id])),
-          discoveredHexIds: Array.from(new Set([...(next.worldMap.discoveredHexIds || []), tile.id])),
-          lastSelectedHexId: tile.id,
-          mapRevision: (next.worldMap.mapRevision || 0) + 1,
-        },
-      };
-      next = revealAround(next, tile.id, 1);
-      next = dispatchGameEvent(next, 'LOCATION_ENTERED', { locationId: tile.locationTag || tile.id, locationName: tile.locationName || tile.sectorName, location: tile.id }).nextState;
-      const dragonkinEvent = rollDragonkinHunterTravelEvent(next, tile.regionId, index + next.dayCount * 193 + tile.q * 17 + tile.r * 31);
-      if (dragonkinEvent) {
-        next = markDragonkinHunterEvent(next);
-        if (dragonkinEvent.kind === 'ENCOUNTER') {
-          next = dispatchGameEvent(next, 'ENCOUNTER_STARTED', { encounterId: dragonkinEvent.id }).nextState;
-          travelLogs.push('• 용족을 노린 전문 사냥 세력의 움직임이 감지되어 이동이 중단되었습니다.');
-          break;
-        }
-        const hunter = REGIONAL_MONSTERS.find((m) => m.id === dragonkinEvent.id);
-        if (hunter) {
-          monsterEncounter = { id: hunter.id, name: hunter.name };
-          travelLogs.push(`• ${hunter.name}의 용족 포획대와 조우하여 이동이 중단되었습니다.`);
-          break;
-        }
-      }
-      if (step.encounterType === 'EVENT' && step.eventText) travelLogs.push(`• ${step.eventText}`);
-      if (step.encounterType === 'MONSTER' && step.monsterId && step.monsterName) {
-        monsterEncounter = { id: step.monsterId, name: step.monsterName };
-        travelLogs.push(`• ${step.monsterName}와 조우하여 이동이 중단되었습니다.`);
-        break;
-      }
+    if (playerState.worldMap.travelSession?.active) {
+      showToast('이미 목적지로 이동 중입니다. 현재 여행을 먼저 마쳐 주세요.', 'error');
+      return;
+    }
+    if (playerState.activeBattle || playerState.activeEncounterId) {
+      showToast('현재 진행 중인 전투 또는 인카운터를 먼저 해결해야 이동할 수 있습니다.', 'error');
+      return;
     }
 
-    if (monsterEncounter) {
-      const def = REGIONAL_MONSTERS.find((m) => m.id === monsterEncounter!.id);
-      const enemy = createEnemyActor({
-        templateId: def?.id,
-        name: def?.name || monsterEncounter.name,
-        level: Math.max(def?.minLevel || 1, Math.min(def?.maxLevel || next.level, next.level)),
-        tier: WORLD_HEX_TILES[next.worldMap.currentHexId]?.layerBossId === def?.id ? 'BOSS' : (def?.tier || 'NORMAL'),
-        skills: def?.skills,
-        personality: def?.personality,
-        race: def?.raceType === 'HUMANOID'
-          ? (def.raceSubtype.startsWith('BEASTKIN_') ? 'BEASTKIN' : def.raceSubtype === 'ELF' ? 'ELF' : 'HUMAN')
-          : 'MONSTER',
-        traits: (() => {
-          const encounterTile = WORLD_HEX_TILES[next.worldMap.currentHexId];
-          const baseTraits = def ? [def.raceType, def.raceSubtype, ...(def.tier === 'ELITE' ? ['ELITE'] : [])] : [];
-          if (encounterTile?.layer === 'UNDERGROUND') baseTraits.push('UNDERGROUND');
-          if (encounterTile?.layer === 'DEEP_UNDERGROUND') baseTraits.push('DEEP_UNDERGROUND');
-          if (encounterTile?.layerBossId === def?.id) {
-            baseTraits.push('REGIONAL_BOSS', 'UNDERGROUND_LAYER_BOSS');
-            if (encounterTile.layerBossClearFlag) baseTraits.push(`CLEAR_FLAG:${encounterTile.layerBossClearFlag}`);
-          }
-          return baseTraits;
-        })(),
-      });
-      const tile = WORLD_HEX_TILES[next.worldMap.currentHexId];
-      next = {
-        ...next,
-        activeBattle: initBattleState(next, [enemy], {
-          name: `${tile?.regionId || '필드'} · ${tile?.terrain || 'UNKNOWN'}`,
-          description: '여행 경로에서 발생한 지역 인카운터.',
-        }),
-      };
+    const session = createTravelSession(playerState, route);
+    if (!session) {
+      showToast('여행 경로를 시작할 수 없습니다.', 'error');
+      return;
     }
 
-    if (route.travelMode === 'FLIGHT') {
-      travelLogs.unshift('• 천룡비행으로 하늘과 천공을 직접 비행했습니다.');
-    }
-    if (route.travelMode === 'AIRSHIP') {
-      const actualFuelCost =
-        airshipFuelCostForDistance(playerState, traveledSkyTiles, 'SKY') +
-        airshipFuelCostForDistance(playerState, traveledCelestialTiles, 'CELESTIAL');
-      if (actualFuelCost > 0) next = consumeAirshipFuel(next, actualFuelCost);
-      travelLogs.unshift(`• 비행정 연료 ${actualFuelCost} 소비.`);
-      next = dispatchGameEvent(next, 'AIRSHIP_TRAVELED', { fuelSpent: actualFuelCost }).nextState;
-    }
-    setPlayerState(next);
-    const msg: GameMessage = {
-      id: `travel-${Date.now()}`,
+    let next = attachTravelSession(playerState, session);
+    const activated = activateCurrentTravelEncounter(next);
+    next = activated.nextState;
+
+    const destination = WORLD_HEX_TILES[session.destinationHexId];
+    const travelStartMessage: GameMessage = {
+      id: `travel-start-${Date.now()}`,
       role: 'system',
-      content: `🗺️ [이동]\n${traveledSteps}개 육각형을 따라 이동했습니다.\n${travelLogs.length ? travelLogs.join('\n') : '• 특별한 사건 없이 이동했습니다.'}`,
+      content: `🗺️ [여행 시작]
+목적지: ${destination?.locationName || destination?.featureName || destination?.sectorName || session.destinationHexId}
+• 거리 ${session.totalHexSteps} Hex
+• 여행 인카운터 ${session.encounters.length}회 (각 Hex에 진입한 상태로 ${session.encountersPerHex}회씩 진행)
+• 예상 이동 시간 ${session.totalMinutes}분 · 평균 위험 ${session.averageDanger}${session.travelMode === 'FLIGHT' ? `\n• 이동 방식: 직접 비행` : session.travelMode === 'AIRSHIP' ? `\n• 이동 방식: 비행정` : ''}`,
       timestamp: Date.now(),
     };
-    const nextMsgs = [...messages, msg];
+    const firstStepMessage: GameMessage | undefined = activated.movedToHexId ? {
+      id: `travel-step-${Date.now() + 1}`,
+      role: 'system',
+      content: `🗺️ [여행 진행]\n${WORLD_HEX_TILES[activated.movedToHexId]?.locationName || WORLD_HEX_TILES[activated.movedToHexId]?.sectorName || '다음 Hex'}에 실제로 진입했습니다. 이 Hex에서 첫 여행 인카운터가 진행됩니다.${(activated.fuelSpent || 0) > 0 ? `\n• 비행정 연료 ${activated.fuelSpent} 소비` : ''}`,
+      timestamp: Date.now() + 1,
+    } : undefined;
+    const nextMsgs = [...messages, travelStartMessage, ...(firstStepMessage ? [firstStepMessage] : []), ...(activated.message ? [activated.message] : [])];
+    setPlayerState(next);
     setMessages(nextMsgs);
     setIsWorldMapOpen(false);
     triggerAutosave(next, nextMsgs);
   };
 
   const handleGatherLifeResources = (tileId: string) => {
+    if (playerState.worldMap.travelSession?.active) { showToast('여행 중에는 현재 Hex의 생활 행동을 할 수 없습니다.', 'error'); return; }
     const tile = WORLD_HEX_TILES[tileId];
     if (!tile || playerState.worldMap.currentHexId !== tileId) { showToast('현재 Hex에서만 채집할 수 있습니다.', 'error'); return; }
     const result = gatherLifeResources(playerState, tile);
@@ -929,6 +1191,7 @@ export default function App() {
   };
 
   const handleWaystationTravel = (wr: WaystationRoute) => {
+    if (playerState.worldMap.travelSession?.active || playerState.activeBattle || playerState.activeEncounterId) { showToast('현재 여행·전투·인카운터를 먼저 해결해야 역참을 이용할 수 있습니다.', 'error'); return; }
     const cur = WORLD_HEX_TILES[playerState.worldMap.currentHexId]; const currentWs = cur?.layer === 'SURFACE' ? getWaystationAt(cur.q, cur.r) : undefined;
     if (!currentWs || (wr.from !== currentWs.id && wr.to !== currentWs.id)) { showToast('해당 역참 노선의 출발지에 있어야 합니다.', 'error'); return; }
     if (playerState.rupees < wr.fare) { showToast('역참 통행료가 부족합니다.', 'error'); return; }
@@ -949,9 +1212,10 @@ ${special?`• 특수 인카운터: ${special.name} — ${special.text}`:'• �
 
   const handleBuildAirship = () => { const res=buildAirship(playerState); if(!res.ok){showToast(res.message,'error');return;} let next=dispatchGameEvent(res.state,'AIRSHIP_BUILT',{airshipLevel:res.state.airship.level}).nextState;setPlayerState(next);showToast(res.message,'success');triggerAutosave(next,messages); };
   const handleUpgradeAirship = (id:string) => { const res=upgradeAirship(playerState,id);if(!res.ok){showToast(res.message,'error');return;}let next=dispatchGameEvent(res.state,'AIRSHIP_UPGRADED',{airshipLevel:res.state.airship.level}).nextState;setPlayerState(next);showToast(res.message,'success');triggerAutosave(next,messages); };
-  const handleRefuelAirship = (id:'aether_fuel_cell'|'storm_fuel_cell') => {const res=refuelAirship(playerState,id,1);if(!res.ok){showToast(res.message,'error');return;}setPlayerState(res.state);showToast(res.message,'success');triggerAutosave(res.state,messages);};
+  const handleRefuelAirship = (id:'aether_fuel_cell'|'storm_fuel_cell') => {const res=refuelAirship(playerState,id,1);if(!res.ok){showToast(res.message,'error');return;}let next=dispatchGameEvent(res.state,'ITEM_USED',{itemId:id,itemName:res.itemName,quantity:res.consumedCount}).nextState;setPlayerState(next);showToast(res.message,'success');triggerAutosave(next,messages);};
 
   const handleEnterDungeon = (dungeonId: string) => {
+    if (playerState.worldMap.travelSession?.active) { showToast('여행 중에는 던전에 입장할 수 없습니다.', 'error'); return; }
     const dungeon = WORLD_DUNGEON_DATABASE[dungeonId];
     const currentTile = WORLD_HEX_TILES[playerState.worldMap.currentHexId];
     if (!dungeon || !currentTile || currentTile.dungeonId !== dungeonId) {
@@ -964,6 +1228,7 @@ ${special?`• 특수 인카운터: ${special.name} — ${special.text}`:'• �
   };
 
   const handleMineOreVein = (tileId: string) => {
+    if (playerState.worldMap.travelSession?.active) { showToast('여행 중에는 광맥을 채굴할 수 없습니다.', 'error'); return; }
     if (playerState.worldMap.currentHexId !== tileId) {
       showToast('광맥이 있는 Hex까지 이동해야 채굴할 수 있습니다.', 'error');
       return;
@@ -973,7 +1238,19 @@ ${special?`• 특수 인카운터: ${special.name} — ${special.text}`:'• �
       showToast(result.message, 'error');
       return;
     }
-    const next = advanceGameTime(result.nextState, result.minutes);
+    // 광맥 채굴도 일반 채집과 동일하게 퀘스트/Fate 이벤트를 발생시킨다.
+    // 실제로 획득된 각 아이템 수량만 반영한 뒤 시간을 진행한다.
+    let gatheredState = result.nextState;
+    for (const item of result.items) {
+      gatheredState = dispatchGameEvent(gatheredState, 'RESOURCE_GATHERED', {
+        gatheredMaterialId: item.id,
+        gatheredMaterialName: item.name,
+        itemId: item.id,
+        itemName: item.name,
+        quantity: item.quantity,
+      }).nextState;
+    }
+    const next = advanceGameTime(gatheredState, result.minutes);
     setPlayerState(next);
     const msg: GameMessage = {
       id: `mine-${Date.now()}`,
@@ -1152,6 +1429,93 @@ ${result.message}
     triggerAutosave(next, messages);
   };
 
+  const appendPetNarrativeAndCommit = async (petId: string, interaction: any, result: { nextState: PlayerState; message: string }) => {
+    // React state 갱신 전의 초단기 더블클릭까지 막기 위한 동기 잠금.
+    if (petInteractionLockRef.current || isLoading) return;
+    petInteractionLockRef.current = true;
+    setIsPetInteractionLoading(true);
+    setIsLoading(true);
+    const pet = playerState.companions.find((c) => c.id === petId && c.kind === 'PET' && c.petState);
+    if (!pet) { petInteractionLockRef.current = false; setIsPetInteractionLoading(false); setIsLoading(false); return; }
+    try {
+      const speciesId = pet.petState!.speciesId;
+      const def = getPetSpeciesDefinition(speciesId);
+      const isTame = interaction?.type === 'TAME';
+      const phase = interaction?.phase || 'REQUEST';
+      const need = interaction?.need === 'BATHROOM' ? 'BATHROOM' : 'DESIRE';
+      const pool = isTame ? getPetTameReferencePool(speciesId) : getPetUserReferencePool(speciesId, need, phase);
+      const reference = pool.length ? pool[Math.floor(Math.random() * pool.length)] : '';
+      const narration = await requestNarration({
+        requestId: `pet-${pet.id}-${Date.now()}`,
+        locale: 'ko-KR',
+        sceneType: isTame ? 'PET_TAME' : `PET_NEED_${phase}`,
+        playerAction: isTame ? '길들이기' : phase === 'ACCEPTED' ? '욕구 해소 요청 수락' : phase === 'REFUSED' ? '욕구 해소 요청 거절' : phase === 'REFUSAL_LIMIT' ? '반복 거절 한계 후속 요청' : '욕구 해소 요청',
+        participants: [{
+          id: pet.id, name: pet.name, role: `${def?.displayName || pet.name} · ${def?.category === 'INSECT' ? '곤충형' : '동물형'} 펫`,
+          stateSummary: `친밀도 ${pet.petState!.relationship?.familiarity ?? 0}, 충성도 ${pet.petState!.relationship?.loyalty ?? 0}, 야생성 ${pet.petState!.wildness ?? 0}`,
+        }],
+        lockedFacts: [result.message],
+        referenceTexts: reference ? [reference] : [],
+        desiredLength: 'MEDIUM',
+      });
+      if (!narration?.text?.trim()) throw new Error('펫 상호작용 로그 생성 실패');
+      const logMessage: GameMessage = { id: `pet-log-${Date.now()}`, role: 'gm', content: normalizeNarrativeText(narration.text), timestamp: Date.now() };
+      const committedState = interaction?.requestId ? { ...result.nextState, companionNeedQueue: (result.nextState.companionNeedQueue || []).filter((cue) => cue.requestId !== interaction.requestId) } : result.nextState;
+      const nextMessages = [...messages, logMessage];
+      setPlayerState(committedState);
+      setMessages(nextMessages);
+      triggerAutosave(committedState, nextMessages);
+    } catch (error:any) {
+      const err: GameMessage = { id:`pet-log-error-${Date.now()}`, role:'system', content:`펫 상호작용 로그를 생성하지 못해 행동이 적용되지 않았습니다. ${error?.message || ''}`, timestamp:Date.now(), status:'error' };
+      setMessages((prev) => [...prev, err]);
+    } finally {
+      petInteractionLockRef.current = false;
+      setIsPetInteractionLoading(false);
+      setIsLoading(false);
+    }
+  };
+
+  const handleRespondPetRequest = async (petId: string, response: 'ACCEPT' | 'REFUSE') => {
+    if (playerState.equippedPetId !== petId) return;
+    const before = playerState.companions.find((c) => c.id === petId && c.kind === 'PET' && c.petState)?.petState?.requestState;
+    const result = respondPetRequest(playerState, petId, response);
+    await appendPetNarrativeAndCommit(petId, { type:'NEED_RESPONSE', need:before?.activeNeed, requestId:before?.requestId, phase: response === 'ACCEPT' ? 'ACCEPTED' : (result.nextState.companionNeedQueue || []).find((q) => q.requestId === before?.requestId)?.phase || 'REFUSED' }, result);
+  };
+
+  const handlePetCare = async (petId: string, action: import('./types').PetCareAction) => {
+    if (playerState.equippedPetId !== petId) return;
+    const result = careForPet(playerState, petId, action);
+    if (action === 'TAME') await appendPetNarrativeAndCommit(petId, { type:'TAME' }, result);
+    else { setPlayerState(result.nextState); triggerAutosave(result.nextState, messages); }
+  };
+
+  const handleFeedPet = (petId: string, itemId: string) => {
+    if (playerState.equippedPetId !== petId) return;
+    const result = feedPet(playerState, petId, itemId);
+    setPlayerState(result.nextState);
+    triggerAutosave(result.nextState, messages);
+  };
+
+  const handleUpgradePetMetabolism = (petId: string) => {
+    if (playerState.equippedPetId !== petId) return;
+    const result = upgradePetMetabolismPerk(playerState, petId);
+    setPlayerState(result.nextState);
+    const log: GameMessage = { id:`pet-metabolism-${Date.now()}`, role:'system', content:result.message, timestamp:Date.now() };
+    const nextMessages = [...messages, log];
+    setMessages(nextMessages);
+    triggerAutosave(result.nextState, nextMessages);
+  };
+
+  const handlePetBattleCommandOutcome = (petId: string, outcome: 'OBEY' | 'INDEPENDENT' | 'FAIL') => {
+    setPlayerState((prev) => recordPetBattleCommandOutcome(prev, petId, outcome));
+  };
+
+  const handleSetEquippedPet = (petId: string | null) => {
+    const result = setEquippedPet(playerState, petId);
+    setPlayerState(result.nextState);
+    triggerAutosave(result.nextState, messages);
+  };
+
   const handleMajorCharacterTalk = (characterId: string) => {
     const c = playerState.majorCharacters?.[characterId];
     if (!c) return;
@@ -1178,6 +1542,18 @@ ${result.message}
     showToast(result.message, 'success');
     const msg: GameMessage = { id: `major-recruit-${Date.now()}`, role: 'system', content: `🤝 ${result.message}`, timestamp: Date.now() };
     const nextMsgs = [...messages, msg]; setMessages(nextMsgs); triggerAutosave(next, nextMsgs);
+  };
+
+  const handleMajorCharacterGift = (characterId: string, itemNameOrId: string) => {
+    const res = useInventoryItem(playerState, itemNameOrId, characterId);
+    if (!res.success) { showToast(res.message, 'error'); return; }
+    const next = sanitizePlayerState(res.nextState);
+    setPlayerState(next);
+    showToast(res.message, 'success');
+    const msg: GameMessage = { id: `major-gift-${Date.now()}`, role: 'system', content: `🎁 ${res.message}`, timestamp: Date.now() };
+    const nextMsgs = [...messages, msg];
+    setMessages(nextMsgs);
+    triggerAutosave(next, nextMsgs);
   };
 
   const handleAcceptQuest = (questId: string) => {
@@ -1300,6 +1676,7 @@ ${result.message}
           onUpdateCompanionSettings={handleCompanionCombatSettings}
           onBattleEnd={handleBattleEnd}
           onSkillUsed={handleSkillUsed}
+          onPetCommandOutcome={handlePetBattleCommandOutcome}
         />
       ) : (
         <div className="flex flex-col w-full h-full min-h-0 overflow-hidden">
@@ -1329,7 +1706,7 @@ ${result.message}
           {/* Bottom Free-form Action Input with Character Floating Menu */}
           <ActionInput
             onSendAction={handleSendAction}
-            isLoading={isLoading}
+            isLoading={isLoading || isPetInteractionLoading}
             isGameOver={isGameOver}
             characterMenu={
               <CharacterFloatingMenu
@@ -1345,11 +1722,12 @@ ${result.message}
                 onOpenInventory={() => setIsInventoryOpen(true)}
                 onOpenEquipment={() => setIsEquipmentOpen(true)}
                 onOpenCrafting={() => setIsCraftingOpen(true)}
-                onOpenQuests={() => setIsQuestOpen(true)}
+                onOpenQuests={() => { setPlayerState((prev) => acknowledgeQuestAlerts(prev)); setIsQuestOpen(true); }}
                 onOpenFate={() => setIsFateOpen(true)}
                 onOpenCamp={() => setIsCampOpen(true)}
                 onOpenCompanions={() => setIsCompanionsOpen(true)}
                 onOpenMajorCharacters={() => setIsMajorCharactersOpen(true)}
+                hideAdventureFab={hasBlockingOverlay}
               />
             }
           />
@@ -1473,6 +1851,22 @@ ${result.message}
         onBuildAirship={handleBuildAirship}
         onUpgradeAirship={handleUpgradeAirship}
         onRefuelAirship={handleRefuelAirship}
+        onEnterSettlement={handleEnterSettlement}
+      />
+
+      <SettlementModal
+        isOpen={isSettlementOpen}
+        settlementId={activeSettlementId}
+        playerState={playerState}
+        onClose={() => { setIsSettlementOpen(false); setActiveSettlementId(undefined); }}
+        onUpdatePlayer={(updated) => {
+          const safe = sanitizePlayerState(updated);
+          setPlayerState(safe);
+          triggerAutosave(safe, messages);
+        }}
+        onStayAtInn={handleStayAtInn}
+        onAcceptQuest={handleAcceptQuest}
+        onToast={(message, kind) => showToast(message, kind || 'info')}
       />
 
       <DungeonExplorerModal
@@ -1544,7 +1938,13 @@ ${result.message}
       {isProfessionsOpen && (
         <LifeSkillsModal
           playerState={playerState}
-          onClose={() => setIsProfessionsOpen(false)}
+          onClose={() => {
+            setIsProfessionsOpen(false);
+            if (campReturnTarget === 'professions') {
+              setCampReturnTarget(null);
+              setIsCampOpen(true);
+            }
+          }}
           onUpdateState={(updater) => setPlayerState(updater)}
           onAddLogMessage={(msg) => {
             setMessages((prev) => [
@@ -1591,7 +1991,13 @@ ${result.message}
       {isBlacksmithOpen && (
         <BlacksmithWorkshopModal
           playerState={playerState}
-          onClose={() => setIsBlacksmithOpen(false)}
+          onClose={() => {
+            setIsBlacksmithOpen(false);
+            if (campReturnTarget === 'blacksmith') {
+              setCampReturnTarget(null);
+              setIsCampOpen(true);
+            }
+          }}
           onUpdateState={(updater) => setPlayerState(updater)}
           onAddLogMessage={(msg) => {
             setMessages((prev) => [
@@ -1611,7 +2017,13 @@ ${result.message}
       {isAlchemyOpen && (
         <AlchemyCraftingModal
           playerState={playerState}
-          onClose={() => setIsAlchemyOpen(false)}
+          onClose={() => {
+            setIsAlchemyOpen(false);
+            if (campReturnTarget === 'alchemy') {
+              setCampReturnTarget(null);
+              setIsCampOpen(true);
+            }
+          }}
           onUpdateState={(updater) => setPlayerState(updater)}
           onAddLogMessage={(msg) => {
             setMessages((prev) => [
@@ -1663,10 +2075,26 @@ ${result.message}
                     },
                   ]);
                 }}
-                onOpenBlacksmith={() => setIsBlacksmithOpen(true)}
-                onOpenAlchemy={() => setIsAlchemyOpen(true)}
-                onOpenProfessions={() => setIsProfessionsOpen(true)}
-                onOpenCompanions={() => setIsCompanionsOpen(true)}
+                onOpenBlacksmith={() => {
+                  setCampReturnTarget('blacksmith');
+                  setIsCampOpen(false);
+                  setIsBlacksmithOpen(true);
+                }}
+                onOpenAlchemy={() => {
+                  setCampReturnTarget('alchemy');
+                  setIsCampOpen(false);
+                  setIsAlchemyOpen(true);
+                }}
+                onOpenProfessions={() => {
+                  setCampReturnTarget('professions');
+                  setIsCampOpen(false);
+                  setIsProfessionsOpen(true);
+                }}
+                onOpenCompanions={() => {
+                  setCampReturnTarget('companions');
+                  setIsCampOpen(false);
+                  setIsCompanionsOpen(true);
+                }}
               />
             </div>
           </div>
@@ -1682,7 +2110,13 @@ ${result.message}
                 파티 동행자 관리 & 전투 전술
               </h2>
               <button
-                onClick={() => setIsCompanionsOpen(false)}
+                onClick={() => {
+                  setIsCompanionsOpen(false);
+                  if (campReturnTarget === 'companions') {
+                    setCampReturnTarget(null);
+                    setIsCampOpen(true);
+                  }
+                }}
                 className="p-1 rounded-lg text-stone-400 hover:text-stone-100 hover:bg-zinc-800 cursor-pointer"
               >
                 <X className="w-5 h-5" />
@@ -1693,6 +2127,12 @@ ${result.message}
                 playerState={playerState}
                 onSetCompanionTactic={handleSetCompanionTactic}
                 onToggleActiveParty={handleToggleActiveParty}
+                onRespondPetRequest={handleRespondPetRequest}
+                onPetCare={handlePetCare}
+                onFeedPet={handleFeedPet}
+                onUpgradePetMetabolism={handleUpgradePetMetabolism}
+                petInteractionLoading={isPetInteractionLoading}
+                onSetEquippedPet={handleSetEquippedPet}
               />
             </div>
           </div>
@@ -1706,6 +2146,7 @@ ${result.message}
         onClose={() => setIsMajorCharactersOpen(false)}
         onTalk={handleMajorCharacterTalk}
         onRecruit={handleMajorCharacterRecruit}
+        onGift={handleMajorCharacterGift}
       />
 
       {/* 퀘스트 일지 모달 */}
@@ -1727,4 +2168,3 @@ ${result.message}
     </div>
   );
 }
-

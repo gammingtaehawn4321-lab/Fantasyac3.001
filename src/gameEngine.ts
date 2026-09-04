@@ -20,7 +20,7 @@ import {
   AddictionTier,
   AdultNarrativeCue,
   BodyPayloadEntry, BodyPayloadKind, BodyCompartmentId, BodyLoadStage,
-  BodyPayloadChange, PartnerClassification, ParasiteState,
+  BodyPayloadChange, PartnerClassification, ParasiteState, EggCohort, EggType, ParasiteOriginRoute, PheromoneLineage,
 } from './types';
 import { getRaceDefinition } from './data/raceData';
 import {
@@ -42,7 +42,8 @@ import { PROFESSIONS_DATABASE, RECIPE_DATABASE } from './data/professions/profes
 import { CampFacilityType, CampProgress } from './data/camp/campTypes';
 import { CAMP_FACILITIES_DATABASE, CAMP_SETUP_COST, INITIAL_CAMP_PROGRESS, READABLE_BOOKS_DATABASE } from './data/camp/campData';
 import { performStatCheck } from './combat/statCheckEngine';
-import { getItemDefinition, enrichInventoryItem } from './data/items';
+import { getItemDefinition, enrichInventoryItem, inferItemMetadata } from './data/items';
+import { POTION_DATABASE } from './data/potions/potionDatabase';
 import { getLockDefinition, LOCK_DATABASE } from './data/locks/lockDatabase';
 import { INITIAL_MAJOR_CHARACTERS, getMajorCharacter } from './data/characters/majorCharacters';
 import { dispatchGameEvent, evaluateGameCondition, evaluateStateBasedObjective, grantQuestRewards } from './gameEvents';
@@ -63,16 +64,53 @@ import {
   getAddictionTierByValue,
   getCorruptionTierByValue,
 } from './data/adultSystemConfig';
-import { BODY_COMPARTMENT_CAPACITY, BODY_LOAD_THRESHOLDS, BODY_PAYLOAD_EFFECTS, BODY_DERIVED_EFFECT_CAPS, BODY_COMPARTMENT_EFFECT_WEIGHTS, BLADDER_CONFIG, INSERTED_PARASITE_EMISSION_DEFAULT } from './data/bodySystemConfig';
-import { resolveBodyPayloadChannel } from './data/bodyPayloadUserDefinitions';
+import { BODY_COMPARTMENT_CAPACITY, BODY_LOAD_THRESHOLDS, BODY_PAYLOAD_EFFECTS, BODY_DERIVED_EFFECT_CAPS, BODY_COMPARTMENT_EFFECT_WEIGHTS, BLADDER_CONFIG, INSERTED_PARASITE_EMISSION_DEFAULT, EGG_SYSTEM_CONFIG, PARASITE_GROWTH_CONFIG, PREGNANCY_SYSTEM_CONFIG } from './data/bodySystemConfig';
 
 import { createInitialSkillProgression, ensureProgressionState, applyProgressionLevelMilestones } from './data/progression/progressionSystem';
-import { createInitialWorldMapState } from './data/world/worldMapSystem';
+import { createInitialWorldMapState, WORLD_HEX_TILES, revealAround, canEnterHex } from './data/world/worldMapSystem';
+import { resolveEncounterMovementTarget, type HexMoveDirection, type EncounterMovementType } from './data/world/encounterMovement';
 import { normalizeFateState } from './data/world/fateSystem';
 import { DEFAULT_AIRSHIP_STATE } from './data/world/lifeTravelSystem';
 import { applyCompanionNeedChanges, applyCompanionNeedTimeProgress, applyCompanionStoryNeedProgress, createInitialCompanionNeeds, normalizeCompanionNeeds } from './data/companions/companionNeeds';
+import { createInitialPetState, normalizePetState } from './data/pets/petState';
+import { applyPetNeedTimeProgress, applyPetStoryNeedProgress, respondToPetNeedRequest } from './data/pets/petNeeds';
+import { feedPetItem, getPetCommandRates, getPetFoodOptions, performPetCare, resolvePetCommand, upgradePetMetabolism, recordPetCommandOutcome, type PetCommandRates, type PetCommandOutcome } from './data/pets/petProgression';
+import { getPetSpeciesDefinition, PET_SPECIES_DATABASE } from './data/pets/petDatabase';
+import { PHEROMONE_CONFIG, calculateActivePheromoneStrength, createEmptyPheromoneState, inferPheromoneLineage, pheromoneTier } from './data/pheromoneSystem';
+import { DEFAULT_PLAYER_PHYSICAL_AGE, isAdultPhysicalAge, normalizeAdultHumanoidPhysicalAge } from './config/agePolicy';
+import { createEmptyCommerceRuntimeState, normalizeCommerceRuntimeState } from './data/world/shops';
+import { createEmptySettlementRuntimeState, normalizeSettlementRuntimeState } from './data/world/settlements';
 
 export const SAVE_KEY = 'AI_TEXT_RPG_SAVE_DATA_V1';
+
+/**
+ * 구 세이브의 야영지 시설 배열이 현재 버전보다 짧아도 모든 정식 시설을 복구한다.
+ * 시설이 통째로 누락된 채 업그레이드 비용만 소비되는 상태를 방지하는 저장 마이그레이션 경계다.
+ */
+function normalizeCampProgress(raw: any): CampProgress {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const savedFacilities = Array.isArray(source.facilities) ? source.facilities : [];
+  const initialById = new Map(INITIAL_CAMP_PROGRESS.facilities.map((f) => [f.facilityId, f]));
+  const savedById = new Map(savedFacilities.filter((f: any) => f && typeof f.facilityId === 'string').map((f: any) => [f.facilityId, f]));
+
+  const facilities = (Object.keys(CAMP_FACILITIES_DATABASE) as CampFacilityType[]).map((facilityId) => {
+    const base = initialById.get(facilityId) || { facilityId, level: 0, isBuilt: false };
+    const saved: any = savedById.get(facilityId);
+    const def = CAMP_FACILITIES_DATABASE[facilityId];
+    if (!saved) return { ...base };
+    const level = clamp(Math.floor(Number(saved.level) || 0), 0, def.maxLevel);
+    return { ...base, ...saved, facilityId, level, isBuilt: level > 0 ? true : Boolean(saved.isBuilt) };
+  });
+
+  return {
+    ...INITIAL_CAMP_PROGRESS,
+    ...source,
+    facilities,
+    unlockedActivities: Array.isArray(source.unlockedActivities) ? source.unlockedActivities : [...INITIAL_CAMP_PROGRESS.unlockedActivities],
+    upgrades: Array.isArray(source.upgrades) ? source.upgrades : [...INITIAL_CAMP_PROGRESS.upgrades],
+    storageItems: Array.isArray(source.storageItems) ? source.storageItems : [],
+  };
+}
 
 // ============================================================
 // 인벤토리 공통 함수: addItem & removeItem
@@ -82,33 +120,10 @@ export const SAVE_KEY = 'AI_TEXT_RPG_SAVE_DATA_V1';
  * 게임 시간을 지닌 분(minute) 단위로 경과시키며 시각 및 일수를 업데이트합니다.
  */
 export function passTime(state: PlayerState, minutes: number): PlayerState {
-  if (!minutes || minutes <= 0) return state;
-
-  let curMin = (state.currentMinute || 0) + minutes;
-  let curHour = state.currentHour || 8;
-  let dayCount = state.dayCount || 1;
-
-  if (curMin >= 60) {
-    const addHours = Math.floor(curMin / 60);
-    curMin = curMin % 60;
-    curHour += addHours;
-
-    if (curHour >= 24) {
-      const addDays = Math.floor(curHour / 24);
-      curHour = curHour % 24;
-      dayCount += addDays;
-    }
-  }
-
-  const timeOfDay: TimeOfDay = getTimeOfDayFromHour(curHour);
-
-  return {
-    ...state,
-    currentMinute: curMin,
-    currentHour: curHour,
-    dayCount,
-    timeOfDay,
-  };
+  // 레거시 시간 경과 진입점도 반드시 공통 시간 엔진을 사용한다.
+  // 제작/제련 등에서 시계만 움직이고 임신·페로몬·기생체·동료 욕구 등의
+  // 지속 시스템이 멈춰 있던 오작동을 방지한다.
+  return advanceGameTime(state, minutes);
 }
 
 /**
@@ -128,20 +143,23 @@ export function addItem(
   if (!cleanName) return inventory;
 
   const existingIndex = inventory.findIndex(
-    existing => existing.name.trim() === cleanName && existing.equipmentId === item.equipmentId && existing.quality === item.quality
+    existing => existing.name.trim() === cleanName && existing.equipmentId === item.equipmentId && existing.bagId === item.bagId && existing.quality === item.quality
   );
 
   if (existingIndex === -1) {
+    const enriched = enrichInventoryItem({ ...item, name: cleanName });
     return [
       ...inventory,
       {
-        id: item.id,
+        ...item,
+        id: item.id || enriched.id,
         name: cleanName,
         quantity: item.quantity,
-        description: item.description || '모험 중 획득한 아이템',
-        equipmentId: item.equipmentId,
-        category: item.category,
-        quality: item.quality,
+        description: item.description || enriched.description,
+        flavorText: item.flavorText || enriched.flavorText,
+        illustrationUrl: item.illustrationUrl || enriched.illustrationUrl,
+        category: item.category || enriched.category,
+        quality: item.quality || 'NORMAL',
       },
     ];
   }
@@ -152,6 +170,10 @@ export function addItem(
           ...existing,
           quantity: existing.quantity + item.quantity,
           description: item.description || existing.description,
+          flavorText: item.flavorText || existing.flavorText,
+          illustrationUrl: item.illustrationUrl || existing.illustrationUrl,
+          bagId: item.bagId || existing.bagId,
+          category: item.category || existing.category,
         }
       : existing
   );
@@ -177,7 +199,7 @@ export function removeItem(
 
   const nextInventory = inventory
     .map(item => {
-      const matches = item.name.trim() === cleanTarget || item.equipmentId === cleanTarget;
+      const matches = item.name.trim() === cleanTarget || item.id === cleanTarget || item.equipmentId === cleanTarget || item.bagId === cleanTarget;
       if (!matches) {
         return item;
       }
@@ -297,6 +319,18 @@ export function getTimeOfDayMigrationHour(timeOfDay?: string): number {
  * - currentHour / currentMinute 갱신
  * - timeOfDay 자동 재계산
  */
+function applyPotionTimeProgress(state: PlayerState, minutes: number): PlayerState {
+  if (!Array.isArray(state.activePotionEffects) || state.activePotionEffects.length === 0 || minutes <= 0) return state;
+  const activePotionEffects = state.activePotionEffects
+    .map((effect) => ({ ...effect, remainingMinutes: Math.max(0, Math.floor(effect.remainingMinutes - minutes)) }))
+    .filter((effect) => effect.remainingMinutes > 0);
+  return { ...state, activePotionEffects };
+}
+
+export function hasActivePotionEffect(state: Pick<PlayerState, 'activePotionEffects'>, statusEffectId: string): boolean {
+  return Boolean(state.activePotionEffects?.some((effect) => effect.statusEffectId === statusEffectId && effect.remainingMinutes > 0));
+}
+
 export function advanceGameTime(
   state: PlayerState,
   minutes: number
@@ -336,10 +370,16 @@ export function advanceGameTime(
 
   let progressedState = applyAdultTimeProgress(nextState, safeMinutes);
   progressedState = applyBodyPayloadTimeProgress(progressedState, safeMinutes);
+  progressedState = applyPheromoneTimeProgress(progressedState, safeMinutes);
+  // 기존 기생체를 먼저 진행시킨 뒤 알을 부화시킨다. 같은 시간 구간에 새로 부화한 개체가 즉시 성장 시간을 중복 적용받지 않도록 순서를 고정한다.
   progressedState = applyParasiteTimeProgress(progressedState, safeMinutes);
+  progressedState = applyEggTimeProgress(progressedState, safeMinutes);
   progressedState = applyBladderTimeProgress(progressedState, safeMinutes);
   progressedState = applyPregnancyTimeProgress(progressedState, safeMinutes);
+  if (addedDays > 0 && PREGNANCY_SYSTEM_CONFIG.rollOnDayChange) progressedState = tryStartPregnancyFromStoredFluid(progressedState, true);
   progressedState = applyCompanionNeedTimeProgress(progressedState, safeMinutes);
+  progressedState = applyPetNeedTimeProgress(progressedState, safeMinutes);
+  progressedState = applyPotionTimeProgress(progressedState, safeMinutes);
   return recalculateAdultDerivedStatus(progressedState);
 }
 
@@ -367,7 +407,7 @@ export function formatGameTime(
 }
 
 export function isAdultStatusEligible(state: Pick<PlayerState, 'profile'>): boolean {
-  return Number(state.profile?.physicalAge ?? 0) >= 18;
+  return isAdultPhysicalAge(state.profile?.physicalAge);
 }
 
 export const NATURAL_DESIRE_GAIN_PER_STORY_LOG =
@@ -572,12 +612,73 @@ export function getBodyLoadStage(amount: number, compartmentId: BodyCompartmentI
   return BODY_LOAD_THRESHOLDS.find((entry) => ratio >= entry.minRatio)?.stage ?? 'EMPTY';
 }
 
+const VALID_BODY_PAYLOAD_KINDS: BodyPayloadKind[] = [
+  'STANDARD_FLUID',
+  'INSECTOID_SECRETION',
+  'URINE',
+  'EGG',
+  'PARASITE',
+];
+
+function normalizeLegacyBodyPayloadKind(value: unknown): BodyPayloadKind | undefined {
+  const raw = String(value || '').toUpperCase();
+  // 구 세이브의 OTHER는 더 이상 별도 종류가 아니므로 일반 체액으로 통합한다.
+  if (raw === 'OTHER') return 'STANDARD_FLUID';
+  return VALID_BODY_PAYLOAD_KINDS.includes(raw as BodyPayloadKind)
+    ? raw as BodyPayloadKind
+    : undefined;
+}
+
+function normalizeSavedBodyPayloads(raw: unknown): BodyPayloadEntry[] {
+  if (!Array.isArray(raw)) return [];
+
+  return raw.flatMap((value: any) => {
+    if (!value || typeof value !== 'object') return [];
+    const payloadKind = normalizeLegacyBodyPayloadKind(value.payloadKind);
+    if (!payloadKind || payloadKind === 'PARASITE') return [];
+    if (!['COMPARTMENT_1', 'COMPARTMENT_2', 'COMPARTMENT_3'].includes(String(value.compartmentId || ''))) return [];
+
+    // payloadChannel은 3종 레거시 필드이므로 읽기만 하고 새 상태에는 보존하지 않는다.
+    const { payloadChannel: _legacyPayloadChannel, ...rest } = value;
+    const legacyFamilyKey = typeof rest.payloadFamilyKey === 'string' ? rest.payloadFamilyKey : undefined;
+    const payloadFamilyKey = legacyFamilyKey
+      ? legacyFamilyKey.replace(/:(?:A|B|C)$/i, `:${payloadKind}`)
+      : undefined;
+
+    const savedEggType = rest.eggType === 'INSECTOID_EGG' || rest.eggType === 'TENTACLE_EGG'
+      ? rest.eggType
+      : payloadKind === 'EGG' && String(rest.sourceSpeciesId || '').toUpperCase().includes('INSECTOID')
+        ? 'INSECTOID_EGG'
+        : payloadKind === 'EGG' && String(rest.sourceSpeciesId || '').toUpperCase().includes('TENTACLE')
+          ? 'TENTACLE_EGG'
+          : undefined;
+    return [{
+      ...rest,
+      payloadKind,
+      payloadFamilyKey,
+      eggType: savedEggType,
+      canCausePregnancy: typeof rest.canCausePregnancy === 'boolean'
+        ? rest.canCausePregnancy
+        : (payloadKind === 'STANDARD_FLUID' || payloadKind === 'INSECTOID_SECRETION'),
+      pheromoneLineage: rest.pheromoneLineage === 'INSECTOID' || rest.pheromoneLineage === 'TENTACLE'
+        ? rest.pheromoneLineage
+        : (payloadKind === 'INSECTOID_SECRETION'
+          ? 'INSECTOID'
+          : (payloadKind === 'STANDARD_FLUID' && String(rest.sourceSpeciesId || rest.payloadFamilyKey || '').toUpperCase().includes('TENTACLE') ? 'TENTACLE' : undefined)),
+      amount: Math.max(0, Number(rest.amount) || 0),
+      elapsedMinutes: Math.max(0, Number(rest.elapsedMinutes) || 0),
+    } as BodyPayloadEntry];
+  });
+}
+
 export function calculateBodyPayloadDerivedEffects(state: PlayerState) {
   let desire = 0, lewdness = 0, corruption = 0, sensitivity = 0;
   for (const payload of state.bodyPayloads ?? []) {
+    const payloadKind = normalizeLegacyBodyPayloadKind((payload as any).payloadKind);
+    if (!payloadKind) continue;
     const capacity = Math.max(1, BODY_COMPARTMENT_CAPACITY[payload.compartmentId]);
     const load = Math.min(1.25, Math.max(0, payload.amount) / capacity);
-    const effect = BODY_PAYLOAD_EFFECTS[payload.payloadKind];
+    const effect = BODY_PAYLOAD_EFFECTS[payloadKind];
     const weight = BODY_COMPARTMENT_EFFECT_WEIGHTS[payload.compartmentId];
     desire += effect.desire * load * weight.desire;
     lewdness += effect.lewdness * load * weight.lewdness;
@@ -592,8 +693,70 @@ export function calculateBodyPayloadDerivedEffects(state: PlayerState) {
   };
 }
 
+function resolveEggType(change: BodyPayloadChange): EggType | undefined {
+  if (change.eggType === 'INSECTOID_EGG' || change.eggType === 'TENTACLE_EGG') return change.eggType;
+  const species = String(change.sourceSpeciesId || '').toUpperCase();
+  if (species.includes('INSECTOID')) return 'INSECTOID_EGG';
+  if (species.includes('TENTACLE')) return 'TENTACLE_EGG';
+  return undefined;
+}
+
+function getParasiteOriginRoute(compartmentId: BodyCompartmentId): ParasiteOriginRoute | undefined {
+  if (compartmentId === 'COMPARTMENT_1') return 'VAGINAL';
+  if (compartmentId === 'COMPARTMENT_2') return 'ANAL';
+  return undefined;
+}
+
+function makeIndependentParasite(
+  state: PlayerState,
+  params: {
+    sourceId?: string;
+    sourceName?: string;
+    sourceSpeciesId?: string;
+    sourceSpeciesName?: string;
+    originCompartmentId: 'COMPARTMENT_1' | 'COMPARTMENT_2';
+    mode: 'INSERTED' | 'INTERNAL';
+    count: number;
+    originEggType?: EggType;
+  }
+): ParasiteState {
+  const originKind = params.originEggType === 'INSECTOID_EGG'
+    ? 'INSECTOID'
+    : params.originEggType === 'TENTACLE_EGG'
+      ? 'TENTACLE'
+      : 'DIRECT';
+  const emissionPayloadKind = originKind === 'TENTACLE' ? 'STANDARD_FLUID' : 'INSECTOID_SECRETION';
+  return {
+    id: `parasite_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+    speciesId: params.sourceSpeciesId || 'unknown_species',
+    mode: params.mode,
+    originKind,
+    originEggType: params.originEggType,
+    originRoute: getParasiteOriginRoute(params.originCompartmentId),
+    originCompartmentId: params.originCompartmentId,
+    currentRegion: params.mode === 'INTERNAL' ? 'ENTRY_REGION' : undefined,
+    count: Math.max(1, Math.round(params.count)),
+    elapsedMinutes: 0,
+    maturationMinutes: PARASITE_GROWTH_CONFIG.maturationMinutes,
+    stage: 'HATCHLING',
+    removable: true,
+    sourceId: params.sourceId,
+    sourceName: params.sourceName,
+    sourceSpeciesId: params.sourceSpeciesId,
+    sourceSpeciesName: params.sourceSpeciesName,
+    emissionProgressMinutes: 0,
+    emissionIntervalMinutes: params.mode === 'INSERTED' ? INSERTED_PARASITE_EMISSION_DEFAULT.intervalMinutes : undefined,
+    emissionAmount: params.mode === 'INSERTED' ? INSERTED_PARASITE_EMISSION_DEFAULT.amountPerInterval : undefined,
+    emissionPayloadKind,
+  };
+}
+
 export function applyBodyPayloadChanges(state: PlayerState, changes: BodyPayloadChange[] = []): PlayerState {
-  let payloads = [...(state.bodyPayloads ?? [])];
+  let payloads = normalizeSavedBodyPayloads(state.bodyPayloads ?? []).filter((entry) => entry.payloadKind !== 'PARASITE');
+  let eggCohorts: EggCohort[] = Array.isArray(state.eggCohorts) ? [...state.eggCohorts] : [];
+  let parasiteStates: ParasiteState[] = Array.isArray(state.parasiteStates) ? [...state.parasiteStates] : [];
+  const eggDepositedCues: AdultNarrativeCue[] = [];
+  let pregnancyRollRequested = false;
 
   const timestamp = () => ({
     day: Math.max(1, Number(state.dayCount) || 1),
@@ -616,78 +779,92 @@ export function applyBodyPayloadChanges(state: PlayerState, changes: BodyPayload
 
   for (const change of changes) {
     if (!change || !['COMPARTMENT_1','COMPARTMENT_2','COMPARTMENT_3'].includes(change.compartmentId)) continue;
-    if (!['STANDARD_FLUID','INSECTOID_SECRETION','URINE','EGG','PARASITE','OTHER'].includes(change.payloadKind)) continue;
-
+    const payloadKind = normalizeLegacyBodyPayloadKind(change.payloadKind);
+    if (!payloadKind) continue;
     const amount = Math.max(0, Number(change.amount) || 0);
-    const payloadChannel = resolveBodyPayloadChannel(change.payloadKind, change.payloadChannel);
+    if (
+      change.compartmentId === PREGNANCY_SYSTEM_CONFIG.allowedCompartmentId
+      && (payloadKind === 'STANDARD_FLUID' || payloadKind === 'INSECTOID_SECRETION')
+      && change.canCausePregnancy !== false
+      && change.operation !== 'REMOVE'
+      && amount > 0
+    ) pregnancyRollRequested = true;
+
+    // 기생체는 더 이상 구획 payload/용량에 들어가지 않는다. 직접 유입도 곧바로 독립 ParasiteState가 된다.
+    if (payloadKind === 'PARASITE') {
+      if (change.compartmentId === 'COMPARTMENT_3') continue;
+      if (change.operation === 'ADD' && amount > 0) {
+        parasiteStates.push(makeIndependentParasite(state, {
+          sourceId: change.sourceId,
+          sourceName: change.sourceName,
+          sourceSpeciesId: change.sourceSpeciesId,
+          sourceSpeciesName: change.sourceSpeciesName,
+          originCompartmentId: change.compartmentId,
+          mode: change.parasiteMode ?? 'INSERTED',
+          count: amount,
+        }));
+      }
+      continue;
+    }
+
+    const eggType = payloadKind === 'EGG' ? resolveEggType(change) : undefined;
+    // 알은 곤충형/촉수형 두 종류만 허용하고, 질/항문 외 구획에는 들어가지 않는다.
+    if (payloadKind === 'EGG' && (!eggType || change.compartmentId === 'COMPARTMENT_3')) continue;
+
     const payloadFamilyKey = change.payloadFamilyKey
       ?? (change.sourceType === 'MONSTER' && change.sourceSpeciesId
-        ? `MONSTER:${change.sourceSpeciesId}:${payloadChannel}`
+        ? `MONSTER:${change.sourceSpeciesId}:${payloadKind}${eggType ? `:${eggType}` : ''}`
         : change.sourceType === 'CHARACTER' && (change.sourceId || change.sourceName)
-          ? `CHARACTER:${change.sourceId || change.sourceName}:${payloadChannel}`
+          ? `CHARACTER:${change.sourceId || change.sourceName}:${payloadKind}${eggType ? `:${eggType}` : ''}`
           : undefined);
     const baseMatch = (entry: BodyPayloadEntry) =>
       entry.compartmentId === change.compartmentId
-      && entry.payloadKind === change.payloadKind
-      && resolveBodyPayloadChannel(entry.payloadKind, entry.payloadChannel) === payloadChannel;
+      && normalizeLegacyBodyPayloadKind((entry as any).payloadKind) === payloadKind
+      && (payloadKind !== 'EGG' || entry.eggType === eggType);
     const exactMatch = (entry: BodyPayloadEntry) => baseMatch(entry) && sameSource(entry, change);
 
     if (change.operation === 'REMOVE' && !hasSpecificSource(change)) {
-      // 출처 미지정 감소는 오래 머문 내용물부터 제거한다.
-      // 서로 다른 출처의 항목은 끝까지 별도 엔트리로 유지한다.
       let remaining = amount;
-      const candidateIds = payloads
-        .filter(baseMatch)
-        .sort((a, b) => (b.elapsedMinutes ?? 0) - (a.elapsedMinutes ?? 0))
-        .map((entry) => entry.id);
-
+      const candidateIds = payloads.filter(baseMatch).sort((a,b) => (b.elapsedMinutes ?? 0) - (a.elapsedMinutes ?? 0)).map((entry) => entry.id);
       for (const id of candidateIds) {
         if (remaining <= 0) break;
         const liveIndex = payloads.findIndex((entry) => entry.id === id);
         if (liveIndex < 0) continue;
         const current = Math.max(0, payloads[liveIndex].amount);
         const removed = Math.min(current, remaining);
-        const nextAmount = current - removed;
         remaining -= removed;
-        if (nextAmount <= 0.001) payloads.splice(liveIndex, 1);
-        else payloads[liveIndex] = { ...payloads[liveIndex], amount: nextAmount };
+        if (current - removed <= 0.001) payloads.splice(liveIndex, 1);
+        else payloads[liveIndex] = { ...payloads[liveIndex], amount: current - removed };
       }
     } else if (change.operation === 'SET' && !hasSpecificSource(change)) {
-      // 출처 없는 SET은 해당 구획/종류 전체량을 재설정하는 관리용 동작이다.
       payloads = payloads.filter((entry) => !baseMatch(entry));
       if (amount > 0) {
         const now = timestamp();
         payloads.push({
           id: `payload_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
-          compartmentId: change.compartmentId,
-          payloadKind: change.payloadKind,
-          payloadChannel,
+          compartmentId: change.compartmentId as 'COMPARTMENT_1' | 'COMPARTMENT_2',
+          payloadKind,
           payloadFamilyKey,
           amount,
           sourceType: 'UNKNOWN',
           firstAddedAt: now,
           lastAddedAt: now,
           elapsedMinutes: 0,
+          eggType,
+          canCausePregnancy: change.canCausePregnancy ?? (payloadKind === 'STANDARD_FLUID' || payloadKind === 'INSECTOID_SECRETION'),
+          pheromoneLineage: change.pheromoneLineage ?? (payloadKind === 'INSECTOID_SECRETION' ? 'INSECTOID' : (payloadKind === 'STANDARD_FLUID' && String(change.sourceSpeciesId || '').toUpperCase().includes('TENTACLE') ? 'TENTACLE' : undefined)),
         });
       }
     } else {
       const index = payloads.findIndex(exactMatch);
       const current = index >= 0 ? payloads[index].amount : 0;
-      const nextAmount = change.operation === 'SET'
-        ? amount
-        : change.operation === 'REMOVE'
-          ? Math.max(0, current - amount)
-          : current + amount;
-
+      const nextAmount = change.operation === 'SET' ? amount : change.operation === 'REMOVE' ? Math.max(0, current - amount) : current + amount;
       if (index >= 0) {
-        if (nextAmount <= 0.001) {
-          payloads.splice(index, 1);
-        } else {
+        if (nextAmount <= 0.001) payloads.splice(index, 1);
+        else {
           const now = timestamp();
           payloads[index] = {
-            ...payloads[index],
-            amount: nextAmount,
-            payloadChannel,
+            ...payloads[index], payloadKind, amount: nextAmount,
             payloadFamilyKey: payloadFamilyKey ?? payloads[index].payloadFamilyKey,
             sourceId: change.sourceId ?? payloads[index].sourceId,
             sourceName: change.sourceName ?? payloads[index].sourceName,
@@ -697,47 +874,86 @@ export function applyBodyPayloadChanges(state: PlayerState, changes: BodyPayload
             sourceSex: change.sourceSex ?? payloads[index].sourceSex,
             lastAddedAt: change.operation === 'ADD' ? now : payloads[index].lastAddedAt,
             elapsedMinutes: change.operation === 'ADD' ? 0 : payloads[index].elapsedMinutes,
+            eggType: eggType ?? payloads[index].eggType,
+            canCausePregnancy: change.canCausePregnancy ?? payloads[index].canCausePregnancy ?? (payloadKind === 'STANDARD_FLUID' || payloadKind === 'INSECTOID_SECRETION'),
+            pheromoneLineage: change.pheromoneLineage ?? payloads[index].pheromoneLineage ?? (payloadKind === 'INSECTOID_SECRETION' ? 'INSECTOID' : (payloadKind === 'STANDARD_FLUID' && String(change.sourceSpeciesId || '').toUpperCase().includes('TENTACLE') ? 'TENTACLE' : undefined)),
           };
         }
       } else if (change.operation !== 'REMOVE' && nextAmount > 0) {
         const now = timestamp();
         payloads.push({
           id: `payload_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
-          compartmentId: change.compartmentId,
-          payloadKind: change.payloadKind,
-          payloadChannel,
-          payloadFamilyKey,
-          amount: nextAmount,
-          sourceId: change.sourceId,
-          sourceName: change.sourceName,
-          sourceSpeciesId: change.sourceSpeciesId,
-          sourceSpeciesName: change.sourceSpeciesName,
-          sourceType: change.sourceType ?? 'UNKNOWN',
-          sourceSex: change.sourceSex,
-          firstAddedAt: now,
-          lastAddedAt: now,
-          elapsedMinutes: 0,
+          compartmentId: change.compartmentId, payloadKind, payloadFamilyKey, amount: nextAmount,
+          sourceId: change.sourceId, sourceName: change.sourceName,
+          sourceSpeciesId: change.sourceSpeciesId, sourceSpeciesName: change.sourceSpeciesName,
+          sourceType: change.sourceType ?? 'UNKNOWN', sourceSex: change.sourceSex,
+          firstAddedAt: now, lastAddedAt: now, elapsedMinutes: 0,
+          eggType,
+          canCausePregnancy: change.canCausePregnancy ?? (payloadKind === 'STANDARD_FLUID' || payloadKind === 'INSECTOID_SECRETION'),
+          pheromoneLineage: change.pheromoneLineage ?? (payloadKind === 'INSECTOID_SECRETION' ? 'INSECTOID' : (payloadKind === 'STANDARD_FLUID' && String(change.sourceSpeciesId || '').toUpperCase().includes('TENTACLE') ? 'TENTACLE' : undefined)),
         });
       }
     }
 
-    if ((change.payloadKind === 'EGG' || change.payloadKind === 'PARASITE') && change.operation === 'ADD' && amount > 0 && change.compartmentId !== 'COMPARTMENT_3') {
-      const mode = change.parasiteMode ?? (change.payloadKind === 'PARASITE' ? 'INSERTED' : 'INTERNAL');
-      const parasite: ParasiteState = {
-        id: `parasite_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
-        speciesId: change.sourceSpeciesId || 'unknown_species', mode,
-        originCompartmentId: change.compartmentId, compartmentId: mode === 'INSERTED' ? change.compartmentId : undefined,
-        currentRegion: mode === 'INTERNAL' ? 'ENTRY_REGION' : undefined,
-        count: Math.max(1, Math.round(amount)), elapsedMinutes: 0, incubationMinutes: change.payloadKind === 'EGG' ? 1440 : 720,
-        stage: 'DORMANT', removable: true,
-        emissionProgressMinutes: 0,
-        emissionIntervalMinutes: mode === 'INSERTED' ? INSERTED_PARASITE_EMISSION_DEFAULT.intervalMinutes : undefined,
-        emissionAmount: mode === 'INSERTED' ? INSERTED_PARASITE_EMISSION_DEFAULT.amountPerInterval : undefined,
-      };
-      state = { ...state, parasiteStates: [...(state.parasiteStates ?? []), parasite] };
+    if (payloadKind === 'EGG' && eggType) {
+      const cohortMatch = (cohort: EggCohort) => cohort.compartmentId === change.compartmentId
+        && cohort.eggType === eggType
+        && (change.sourceId ? cohort.sourceId === change.sourceId : change.sourceSpeciesId ? cohort.sourceSpeciesId === change.sourceSpeciesId : true);
+      if (change.operation === 'ADD' && amount > 0) {
+        const count = Math.max(1, Math.round(change.eggCount ?? amount / Math.max(0.001, EGG_SYSTEM_CONFIG.volumePerEgg[eggType])));
+        const newCohort: EggCohort = {
+          id: `egg_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+          eggType,
+          compartmentId: change.compartmentId as 'COMPARTMENT_1' | 'COMPARTMENT_2',
+          count,
+          occupiedAmount: amount,
+          sourceId: change.sourceId, sourceName: change.sourceName,
+          sourceSpeciesId: change.sourceSpeciesId, sourceSpeciesName: change.sourceSpeciesName,
+          sourceType: change.sourceType,
+          depositedAt: timestamp(), elapsedActiveMinutes: 0,
+          incubationMinutes: EGG_SYSTEM_CONFIG.incubationMinutes[eggType],
+          stage: 'DORMANT', plannedGrowthMode: change.parasiteMode ?? 'INTERNAL',
+        };
+        eggCohorts.push(newCohort);
+        eggDepositedCues.push({
+          type: 'EGG_DEPOSITED',
+          amount: count,
+          sourceId: newCohort.id,
+          eggType,
+          originRoute: change.compartmentId === 'COMPARTMENT_2' ? 'ANAL' : 'VAGINAL',
+        });
+      } else if (change.operation === 'REMOVE') {
+        let remaining = amount;
+        eggCohorts = eggCohorts.flatMap((cohort) => {
+          if (!cohortMatch(cohort) || remaining <= 0) return [cohort];
+          const removed = Math.min(cohort.occupiedAmount, remaining);
+          remaining -= removed;
+          const ratio = cohort.occupiedAmount > 0 ? (cohort.occupiedAmount - removed) / cohort.occupiedAmount : 0;
+          if (ratio <= 0.001) return [];
+          return [{ ...cohort, occupiedAmount: cohort.occupiedAmount - removed, count: Math.max(1, Math.round(cohort.count * ratio)) }];
+        });
+      } else if (change.operation === 'SET') {
+        eggCohorts = eggCohorts.filter((cohort) => !cohortMatch(cohort));
+        if (amount > 0) {
+          const count = Math.max(1, Math.round(change.eggCount ?? amount / Math.max(0.001, EGG_SYSTEM_CONFIG.volumePerEgg[eggType])));
+          eggCohorts.push({
+            id: `egg_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+            eggType, compartmentId: change.compartmentId as 'COMPARTMENT_1' | 'COMPARTMENT_2', count, occupiedAmount: amount,
+            sourceId: change.sourceId, sourceName: change.sourceName,
+            sourceSpeciesId: change.sourceSpeciesId, sourceSpeciesName: change.sourceSpeciesName,
+            sourceType: change.sourceType, depositedAt: timestamp(), elapsedActiveMinutes: 0,
+            incubationMinutes: EGG_SYSTEM_CONFIG.incubationMinutes[eggType], stage: 'DORMANT', plannedGrowthMode: change.parasiteMode ?? 'INTERNAL',
+          });
+        }
+      }
     }
   }
-  return recalculateAdultDerivedStatus({ ...state, bodyPayloads: payloads });
+
+  let next = { ...state, bodyPayloads: payloads, eggCohorts, parasiteStates };
+  for (const cue of eggDepositedCues) next = enqueueAdultNarrativeCue(next, cue);
+  if (pregnancyRollRequested) next = tryStartPregnancyFromStoredFluid(next);
+  next = synchronizePheromoneState(next);
+  return recalculateAdultDerivedStatus(next);
 }
 
 export function applyBodyPayloadTimeProgress(state: PlayerState, elapsedMinutes: number): PlayerState {
@@ -746,8 +962,100 @@ export function applyBodyPayloadTimeProgress(state: PlayerState, elapsedMinutes:
   const bodyPayloads = (state.bodyPayloads ?? []).map((p) => ({
     ...p, elapsedMinutes: (p.elapsedMinutes ?? 0) + minutes,
     amount: Math.max(0, p.amount - Math.max(0, p.decayPerHour ?? 0) * minutes / 60),
-  })).filter((p) => p.amount > 0.001);
+  })).filter((p) => p.amount > 0.001 && p.payloadKind !== 'PARASITE');
   return { ...state, bodyPayloads };
+}
+
+export function applyEggTimeProgress(state: PlayerState, elapsedMinutes: number): PlayerState {
+  const minutes = Math.max(0, Math.floor(elapsedMinutes));
+  if (!minutes || !Array.isArray(state.eggCohorts) || state.eggCohorts.length === 0) return state;
+
+  let next: PlayerState = { ...state, eggCohorts: [...state.eggCohorts], parasiteStates: [...(state.parasiteStates ?? [])] };
+  const survivors: EggCohort[] = [];
+
+  for (const cohort of next.eggCohorts ?? []) {
+    const reactionKind = EGG_SYSTEM_CONFIG.reactionFluidKind[cohort.eggType] as BodyPayloadKind;
+    const fluidAmount = (next.bodyPayloads ?? [])
+      .filter((entry) => entry.compartmentId === cohort.compartmentId && entry.payloadKind === reactionKind)
+      .reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
+    const active = fluidAmount > 0.001;
+    const previousStage = cohort.stage;
+    const elapsedActiveMinutes = active ? cohort.elapsedActiveMinutes + minutes : cohort.elapsedActiveMinutes;
+    const ratio = cohort.incubationMinutes > 0 ? elapsedActiveMinutes / cohort.incubationMinutes : 1;
+    const stage = !active ? 'DORMANT' : ratio >= 1 ? 'HATCH_READY' : ratio >= EGG_SYSTEM_CONFIG.developingThreshold ? 'DEVELOPING' : 'ACTIVE';
+
+    if (active && next.adultStatus) {
+      const capacity = Math.max(1, BODY_COMPARTMENT_CAPACITY[cohort.compartmentId]);
+      const eggLoad = Math.min(1, Math.max(0, cohort.occupiedAmount) / capacity);
+      const fluidLoad = Math.min(1, fluidAmount / capacity);
+      const intensity = Math.sqrt(Math.max(0, eggLoad * fluidLoad));
+      const ticks = minutes / EGG_SYSTEM_CONFIG.reactionTickMinutes;
+      if (intensity > 0 && ticks > 0) {
+        next = {
+          ...next,
+          adultStatus: {
+            ...next.adultStatus,
+            desire: clamp((next.adultStatus.desire ?? 0) + EGG_SYSTEM_CONFIG.desireGainAtFullLoadPerTick * intensity * ticks, 0, 100),
+            baseSensitivity: clamp((next.adultStatus.baseSensitivity ?? next.adultStatus.sensitivity ?? 0) + EGG_SYSTEM_CONFIG.sensitivityGainAtFullLoadPerTick * intensity * ticks, 0, 100),
+          },
+        };
+      }
+    }
+
+    if (stage === 'HATCH_READY') {
+      // 부화하는 순간 알은 원래 구획의 EGG 점유에서 빠지고, 기생체는 별도 상태로 독립한다.
+      let remaining = cohort.occupiedAmount;
+      const bodyPayloads = [...(next.bodyPayloads ?? [])];
+      for (let i = bodyPayloads.length - 1; i >= 0 && remaining > 0; i--) {
+        const entry = bodyPayloads[i];
+        if (entry.payloadKind !== 'EGG' || entry.compartmentId !== cohort.compartmentId || entry.eggType !== cohort.eggType) continue;
+        if (cohort.sourceId && entry.sourceId !== cohort.sourceId) continue;
+        const removed = Math.min(remaining, Math.max(0, entry.amount));
+        remaining -= removed;
+        if (entry.amount - removed <= 0.001) bodyPayloads.splice(i, 1);
+        else bodyPayloads[i] = { ...entry, amount: entry.amount - removed };
+      }
+      next = { ...next, bodyPayloads };
+      next.parasiteStates = [
+        ...(next.parasiteStates ?? []),
+        makeIndependentParasite(next, {
+          sourceId: cohort.sourceId, sourceName: cohort.sourceName,
+          sourceSpeciesId: cohort.sourceSpeciesId, sourceSpeciesName: cohort.sourceSpeciesName,
+          originCompartmentId: cohort.compartmentId, mode: cohort.plannedGrowthMode,
+          count: cohort.count, originEggType: cohort.eggType,
+        }),
+      ];
+      const originRoute = cohort.compartmentId === 'COMPARTMENT_2' ? 'ANAL' : 'VAGINAL';
+      next = enqueueAdultNarrativeCue(next, {
+        type: 'EGG_HATCH_READY',
+        amount: cohort.count,
+        sourceId: cohort.id,
+        eggType: cohort.eggType,
+        originRoute,
+      });
+      next = enqueueAdultNarrativeCue(next, {
+        type: 'EGG_HATCHED',
+        amount: cohort.count,
+        sourceId: cohort.id,
+        eggType: cohort.eggType,
+        originRoute,
+      });
+      continue;
+    }
+
+    survivors.push({ ...cohort, elapsedActiveMinutes, stage });
+    if (previousStage !== stage) {
+      next = enqueueAdultNarrativeCue(next, {
+        type: stage === 'DORMANT' ? 'EGG_REACTION_STOPPED' : previousStage === 'DORMANT' ? 'EGG_ACTIVATED' : 'EGG_DEVELOPING',
+        sourceId: cohort.id,
+        eggType: cohort.eggType,
+        originRoute: cohort.compartmentId === 'COMPARTMENT_2' ? 'ANAL' : 'VAGINAL',
+      });
+    }
+  }
+
+  next = { ...next, eggCohorts: survivors };
+  return recalculateAdultDerivedStatus(next);
 }
 
 export function applyParasiteTimeProgress(state: PlayerState, elapsedMinutes: number): PlayerState {
@@ -755,17 +1063,19 @@ export function applyParasiteTimeProgress(state: PlayerState, elapsedMinutes: nu
   if (!minutes) return state;
   let next = { ...state, parasiteStates: [...(state.parasiteStates ?? [])] };
   const updated: ParasiteState[] = [];
-  for (const p of next.parasiteStates) {
-    const elapsed = (p.elapsedMinutes ?? 0) + minutes;
-    const ratio = p.incubationMinutes > 0 ? elapsed / p.incubationMinutes : 1;
-    const stage = ratio >= 1 ? 'MATURE' : ratio >= 0.25 ? 'DEVELOPING' : 'DORMANT';
-    let emissionProgressMinutes = (p.emissionProgressMinutes ?? 0) + minutes;
-    if (p.mode === 'INSERTED' && p.compartmentId && p.emissionIntervalMinutes && p.emissionAmount) {
-      const ticks = Math.floor(emissionProgressMinutes / p.emissionIntervalMinutes);
-      emissionProgressMinutes %= p.emissionIntervalMinutes;
-      if (ticks > 0) next = applyBodyPayloadChanges(next, [{ operation: 'ADD', compartmentId: p.compartmentId, payloadKind: 'INSECTOID_SECRETION', amount: ticks * p.emissionAmount * Math.max(1, p.count), sourceId: p.id, sourceName: p.speciesId, sourceSpeciesId: p.speciesId, sourceType: 'PARASITE' }]);
+  for (const raw of next.parasiteStates) {
+    const maturationMinutes = Math.max(1, Number(raw.maturationMinutes ?? raw.incubationMinutes ?? PARASITE_GROWTH_CONFIG.maturationMinutes));
+    const elapsed = (raw.elapsedMinutes ?? 0) + minutes;
+    const ratio = elapsed / maturationMinutes;
+    const stage = ratio >= 1 ? 'MATURE' : ratio >= 0.25 ? 'JUVENILE' : 'HATCHLING';
+    let emissionProgressMinutes = (raw.emissionProgressMinutes ?? 0) + minutes;
+    if (raw.mode === 'INSERTED' && stage === 'MATURE' && raw.originCompartmentId && raw.emissionIntervalMinutes && raw.emissionAmount) {
+      const ticks = Math.floor(emissionProgressMinutes / raw.emissionIntervalMinutes);
+      emissionProgressMinutes %= raw.emissionIntervalMinutes;
+      if (ticks > 0) next = applyBodyPayloadChanges(next, [{ operation: 'ADD', compartmentId: raw.originCompartmentId, payloadKind: raw.emissionPayloadKind ?? 'INSECTOID_SECRETION', amount: ticks * raw.emissionAmount * Math.max(1, raw.count), sourceId: raw.id, sourceName: raw.speciesId, sourceSpeciesId: raw.speciesId, sourceType: 'PARASITE', canCausePregnancy: false, pheromoneLineage: raw.originKind === 'TENTACLE' ? 'TENTACLE' : raw.originKind === 'INSECTOID' ? 'INSECTOID' : undefined }]);
     }
-    updated.push({ ...p, elapsedMinutes: elapsed, stage, emissionProgressMinutes });
+    if (raw.stage !== 'MATURE' && stage === 'MATURE') next = enqueueAdultNarrativeCue(next, { type: raw.mode === 'INSERTED' ? 'PARASITE_INSERTED_MATURED' : 'PARASITE_INTERNAL_MATURED', sourceId: raw.id });
+    updated.push({ ...raw, maturationMinutes, elapsedMinutes: elapsed, stage, emissionProgressMinutes, compartmentId: undefined, incubationMinutes: undefined });
   }
   return { ...next, parasiteStates: updated };
 }
@@ -790,33 +1100,40 @@ export function resolveReflexRelease(state: PlayerState, category: 'HUMANOID' | 
 }
 
 export function resolveChildSpecies(parentA: PartnerClassification, parentB: PartnerClassification): string | undefined {
-  if (!parentA.speciesId || !parentB.speciesId) return undefined;
+  const a = parentA.speciesId;
+  const b = parentB.speciesId;
+  if (!a && !b) return undefined;
+  if (!a) return b;
+  if (!b) return a;
   const aAberrant = parentA.category === 'ABERRANT';
   const bAberrant = parentB.category === 'ABERRANT';
-  if (aAberrant && !bAberrant) return parentA.speciesId;
-  if (!aAberrant && bAberrant) return parentB.speciesId;
-  if (parentA.speciesId === parentB.speciesId) return parentA.speciesId;
-  return Math.random() < 0.5 ? parentA.speciesId : parentB.speciesId;
+  if (aAberrant && !bAberrant) return a;
+  if (!aAberrant && bAberrant) return b;
+  if (a === b) return a;
+  return Math.random() < 0.5 ? a : b;
 }
 
 export function startPregnancy(
   state: PlayerState,
   parentA: PartnerClassification,
   parentB: PartnerClassification,
-  gestationMinutes = 40320
+  gestationMinutes: number = PREGNANCY_SYSTEM_CONFIG.defaultGestationMinutes,
+  source?: Pick<BodyPayloadEntry, 'id' | 'sourceId' | 'sourceName' | 'sourceSpeciesId' | 'sourceSpeciesName'>
 ): PlayerState {
   if (!isAdultStatusEligible(state) || state.pregnancy?.active) return state;
-  // 번식 경로는 성인 지성체 분류만 사용. 비지성/군체/불명은 별도 생태 시스템으로 처리한다.
-  if (parentA.sapience !== 'SAPIENT' || parentB.sapience !== 'SAPIENT') return state;
   const childSpeciesId = resolveChildSpecies(parentA, parentB);
-  if (!childSpeciesId) return state;
-  return {
+  const next: PlayerState = {
     ...state,
     pregnancy: {
       active: true,
       parentASpeciesId: parentA.speciesId,
       parentBSpeciesId: parentB.speciesId,
       childSpeciesId,
+      sourceParentId: source?.sourceId,
+      sourceParentName: source?.sourceName,
+      sourceParentSpeciesId: source?.sourceSpeciesId,
+      sourceParentSpeciesName: source?.sourceSpeciesName,
+      conceptionPayloadId: source?.id,
       startedAtDay: state.dayCount,
       startedAtHour: state.currentHour,
       startedAtMinute: state.currentMinute,
@@ -825,6 +1142,59 @@ export function startPregnancy(
       stage: 'EARLY',
     },
   };
+  return enqueueAdultNarrativeCue(next, { type: 'PREGNANCY_STARTED', sourceId: source?.id });
+}
+
+function pregnancyCapableFluidEntries(state: PlayerState): BodyPayloadEntry[] {
+  return (state.bodyPayloads ?? []).filter((entry) =>
+    entry.compartmentId === PREGNANCY_SYSTEM_CONFIG.allowedCompartmentId
+    && (entry.payloadKind === 'STANDARD_FLUID' || entry.payloadKind === 'INSECTOID_SECRETION')
+    && entry.canCausePregnancy !== false
+    && Math.max(0, Number(entry.amount) || 0) > 0.001
+  );
+}
+
+function weightedPregnancySource(entries: BodyPayloadEntry[]): BodyPayloadEntry | undefined {
+  const total = entries.reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
+  if (total <= 0) return undefined;
+  let roll = Math.random() * total;
+  for (const entry of entries) {
+    roll -= Math.max(0, Number(entry.amount) || 0);
+    if (roll <= 0) return entry;
+  }
+  return entries[entries.length - 1];
+}
+
+/**
+ * 임신은 산란/부화와 완전히 별개다.
+ * COMPARTMENT_1(질/자궁 계통)의 임신 가능 정액만 판정에 사용한다.
+ * COMPARTMENT_2(항문)는 어떤 양이 있어도 임신 판정을 하지 않는다.
+ */
+export function tryStartPregnancyFromStoredFluid(state: PlayerState, forceRoll = false): PlayerState {
+  if (!isAdultStatusEligible(state) || state.pregnancy?.active) return state;
+  const entries = pregnancyCapableFluidEntries(state);
+  if (entries.length === 0) return state;
+
+  const amount = entries.reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
+  const capacity = Math.max(1, BODY_COMPARTMENT_CAPACITY[PREGNANCY_SYSTEM_CONFIG.allowedCompartmentId]);
+  const fillRatio = Math.max(0, amount / capacity);
+  const guaranteed = fillRatio >= PREGNANCY_SYSTEM_CONFIG.guaranteedFillRatio;
+  const chance = guaranteed
+    ? 1
+    : Math.min(PREGNANCY_SYSTEM_CONFIG.maxChanceBelowGuaranteed,
+        (fillRatio / PREGNANCY_SYSTEM_CONFIG.guaranteedFillRatio) * PREGNANCY_SYSTEM_CONFIG.maxChanceBelowGuaranteed);
+
+  if (!guaranteed && chance <= 0) return state;
+  if (!guaranteed && !forceRoll && Math.random() >= chance) return state;
+  if (!guaranteed && forceRoll && Math.random() >= chance) return state;
+
+  const source = weightedPregnancySource(entries);
+  if (!source) return state;
+  const playerSpecies = String(state.race || state.profile?.race || 'HUMAN');
+  const sourceCategory: PartnerClassification['category'] = source.sourceType === 'MONSTER' ? 'ABERRANT' : 'HUMANOID';
+  const parentA: PartnerClassification = { category: 'HUMANOID', sapience: 'SAPIENT', speciesId: playerSpecies };
+  const parentB: PartnerClassification = { category: sourceCategory, sapience: source.sourceType === 'CHARACTER' ? 'SAPIENT' : 'UNKNOWN', speciesId: source.sourceSpeciesId || source.sourceName || 'UNKNOWN' };
+  return startPregnancy(state, parentA, parentB, PREGNANCY_SYSTEM_CONFIG.defaultGestationMinutes, source);
 }
 
 export function applyPregnancyTimeProgress(state: PlayerState, elapsedMinutes: number): PlayerState {
@@ -833,7 +1203,100 @@ export function applyPregnancyTimeProgress(state: PlayerState, elapsedMinutes: n
   const elapsed = Math.min(p.gestationMinutes, p.elapsedMinutes + Math.max(0, Math.floor(elapsedMinutes)));
   const ratio = p.gestationMinutes > 0 ? elapsed / p.gestationMinutes : 1;
   const stage = ratio >= 1 ? 'READY' : ratio >= .75 ? 'LATE' : ratio >= .4 ? 'MID' : 'EARLY';
-  return { ...state, pregnancy: { ...p, elapsedMinutes: elapsed, stage } };
+  let next: PlayerState = { ...state, pregnancy: { ...p, elapsedMinutes: elapsed, stage } };
+  if (p.stage !== stage) {
+    next = enqueueAdultNarrativeCue(next, { type: stage === 'READY' ? 'PREGNANCY_READY' : 'PREGNANCY_STAGE_CHANGED', sourceId: p.conceptionPayloadId, previousStage: p.stage, currentStage: stage });
+  }
+  return next;
+}
+
+export function synchronizePheromoneState(state: PlayerState): PlayerState {
+  const previous = state.pheromoneState ?? createEmptyPheromoneState();
+  const nextState = createEmptyPheromoneState();
+  (['INSECTOID','TENTACLE'] as PheromoneLineage[]).forEach((lineage) => {
+    const activeStrength = calculateActivePheromoneStrength(state, lineage);
+    const old = previous[lineage];
+    if (activeStrength > 0) {
+      nextState[lineage] = {
+        lineage,
+        activeStrength,
+        residualStrength: activeStrength,
+        effectiveStrength: activeStrength,
+        residualMinutesRemaining: PHEROMONE_CONFIG.residualDurationMinutes,
+        tier: pheromoneTier(activeStrength),
+      };
+    } else if (old?.residualMinutesRemaining > 0 && old.residualStrength > 0) {
+      const effectiveStrength = old.residualStrength * Math.max(0, Math.min(1, old.residualMinutesRemaining / PHEROMONE_CONFIG.residualDurationMinutes));
+      nextState[lineage] = { ...old, lineage, activeStrength: 0, effectiveStrength, tier: pheromoneTier(effectiveStrength, true) };
+    }
+  });
+  return { ...state, pheromoneState: nextState };
+}
+
+/** 체내 정액의 활성 페로몬과 정액 제거 후 잔향을 시간 단위로 처리한다. */
+export function applyPheromoneTimeProgress(state: PlayerState, elapsedMinutes: number): PlayerState {
+  const minutes = Math.max(0, Math.floor(elapsedMinutes));
+  if (minutes <= 0) return synchronizePheromoneState(state);
+  const previous = state.pheromoneState ?? createEmptyPheromoneState();
+  const nextPheromones = createEmptyPheromoneState();
+  let next = state;
+  let totalEffectiveStrength = 0;
+
+  for (const lineage of ['INSECTOID','TENTACLE'] as PheromoneLineage[]) {
+    const activeStrength = calculateActivePheromoneStrength(state, lineage);
+    const old = previous[lineage];
+    let residualStrength = Math.max(0, Number(old?.residualStrength) || 0);
+    let residualMinutesRemaining = Math.max(0, Number(old?.residualMinutesRemaining) || 0);
+    let effectiveStrength = 0;
+    let residual = false;
+
+    if (activeStrength > 0) {
+      residualStrength = activeStrength;
+      residualMinutesRemaining = PHEROMONE_CONFIG.residualDurationMinutes;
+      effectiveStrength = activeStrength;
+      if ((old?.activeStrength || 0) <= 0) {
+        next = enqueueAdultNarrativeCue(next, { type: lineage === 'INSECTOID' ? 'PHEROMONE_INSECTOID_ACTIVE' : 'PHEROMONE_TENTACLE_ACTIVE' });
+      }
+    } else {
+      if ((old?.activeStrength || 0) > 0) {
+        residualStrength = Math.max(residualStrength, old.activeStrength);
+        residualMinutesRemaining = PHEROMONE_CONFIG.residualDurationMinutes;
+        next = enqueueAdultNarrativeCue(next, { type: lineage === 'INSECTOID' ? 'PHEROMONE_INSECTOID_RESIDUAL_START' : 'PHEROMONE_TENTACLE_RESIDUAL_START' });
+      } else if (residualMinutesRemaining > 0) {
+        residualMinutesRemaining = Math.max(0, residualMinutesRemaining - minutes);
+      }
+      if (residualMinutesRemaining > 0 && residualStrength > 0) {
+        residual = true;
+        effectiveStrength = residualStrength * Math.max(0, Math.min(1, residualMinutesRemaining / PHEROMONE_CONFIG.residualDurationMinutes));
+      } else if ((old?.effectiveStrength || 0) > 0) {
+        next = enqueueAdultNarrativeCue(next, { type: lineage === 'INSECTOID' ? 'PHEROMONE_INSECTOID_RESIDUAL_END' : 'PHEROMONE_TENTACLE_RESIDUAL_END' });
+      }
+    }
+
+    nextPheromones[lineage] = {
+      lineage,
+      activeStrength,
+      residualStrength,
+      effectiveStrength,
+      residualMinutesRemaining,
+      tier: pheromoneTier(effectiveStrength, residual),
+    };
+    totalEffectiveStrength += effectiveStrength;
+  }
+
+  next = { ...next, pheromoneState: nextPheromones };
+  if (isAdultStatusEligible(next) && next.adultStatus && totalEffectiveStrength > 0) {
+    const hours = minutes / 60;
+    next = {
+      ...next,
+      adultStatus: {
+        ...next.adultStatus,
+        desire: clamp((next.adultStatus.desire ?? 0) + PHEROMONE_CONFIG.desireGainPerHourAtFullStrength * totalEffectiveStrength * hours, 0, 100),
+        baseSensitivity: clamp((next.adultStatus.baseSensitivity ?? 0) + PHEROMONE_CONFIG.sensitivityGainPerHourAtFullStrength * totalEffectiveStrength * hours, 0, 100),
+      },
+    };
+  }
+  return next;
 }
 
 export function recalculateAdultDerivedStatus(
@@ -941,6 +1404,7 @@ export function applyStoryLogProgress(
   };
 
   nextState = applyCompanionStoryNeedProgress(nextState);
+  nextState = applyPetStoryNeedProgress(nextState);
 
   if (
     !isAdultStatusEligible(nextState) ||
@@ -1176,7 +1640,7 @@ export const DEFAULT_CHARACTER_PROFILE: CharacterProfile = {
   inGameName: '모험가',
   name: '모험가',
   gender: '여성',
-  physicalAge: 18,
+  physicalAge: DEFAULT_PLAYER_PHYSICAL_AGE,
   race: 'HUMAN',
   height: 170,
   build: 'AVERAGE',
@@ -1262,10 +1726,12 @@ export function createSampleCompanions(): CompanionData[] {
         CHEST: 'scout_leather_vest',
         BOOTS: 'swift_leather_boots',
       },
+      kind: 'HUMANOID',
       bond: {
         bondLevel: 1,
         bondExp: 0,
         trust: 50,
+        affection: 50,
         personalFlags: {},
       },
       needs: createInitialCompanionNeeds(),
@@ -1304,10 +1770,12 @@ export function createSampleCompanions(): CompanionData[] {
         OFF_HAND: 'knight_iron_shield',
         CHEST: 'heavy_plate_cuirass',
       },
+      kind: 'HUMANOID',
       bond: {
         bondLevel: 1,
         bondExp: 0,
         trust: 45,
+        affection: 45,
         personalFlags: {},
       },
       needs: createInitialCompanionNeeds(),
@@ -1317,6 +1785,54 @@ export function createSampleCompanions(): CompanionData[] {
       recentConversationTopics: ['용병 시절의 무용담', '철광석 선별 노하우'],
     },
   ];
+}
+
+/** 3.3 검증용 임시 플래그. 정식 출시 전 false로 되돌린다. */
+export const PET_TEST_UNLOCK_ALL = true;
+
+function createPetCompanionData(
+  speciesId: import('./types').PetSpeciesId,
+  options: { id?: string; name?: string; level?: number; appearance?: string; active?: boolean } = {},
+): CompanionData {
+  const def = getPetSpeciesDefinition(speciesId);
+  const level = Math.max(1, Math.floor(Number(options.level) || 1));
+  const baseStats = { ...def.baseStats } as PlayerStats;
+  const initialPetState = createInitialPetState(speciesId);
+  return {
+    id: options.id || `pet_${speciesId.toLowerCase()}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    name: options.name || def.displayName,
+    kind: 'PET',
+    petState: { ...initialPetState, growth: { ...initialPetState.growth, level } },
+    gender: '',
+    race: 'BEASTKIN',
+    appearance: options.appearance || `${def.displayName} 형태의 펫`,
+    level,
+    experience: 0,
+    hp: 300 + level * 40,
+    maxHp: 300 + level * 40,
+    mp: 0,
+    maxMp: 0,
+    sanity: 100,
+    maxSanity: 100,
+    baseStats,
+    stats: { ...baseStats },
+    talentPoints: 0,
+    learnedTalents: {},
+    learnedSkills: [],
+    professions: [],
+    equipment: createInitialEquippedItems(),
+    bond: { bondLevel: 1, bondExp: 0, trust: 0, affection: 0, personalFlags: {} },
+    needs: createInitialCompanionNeeds(),
+    combatTactic: 'BALANCED',
+    isActivePartyMember: options.active ?? false,
+  };
+}
+
+function createTestingPetCompanions(): CompanionData[] {
+  if (!PET_TEST_UNLOCK_ALL) return [];
+  return (Object.keys(PET_SPECIES_DATABASE) as import('./types').PetSpeciesId[]).map((speciesId) =>
+    createPetCompanionData(speciesId, { id: `test_pet_${speciesId.toLowerCase()}`, active: false })
+  );
 }
 
 export function createNewPlayerState(
@@ -1395,12 +1911,15 @@ export function createNewPlayerState(
     mana: maxMana,
     maxMana,
     rupees: 100,
+    commerce: createEmptyCommerceRuntimeState(),
+    settlementState: createEmptySettlementRuntimeState(),
     combatClass: 'NONE',
     classEvolutionTier: 1,
     talentPoints: 0,
     learnedTalents: {},
     learnedSkills: Array.from(new Set(['basic_attack', 'defend_stance', 'first_aid', ...(race === 'DRAGONKIN' ? ['dragonkin_sacred_breath','dragonkin_scale_guard'] : [])])),
     activeBattle: null,
+    defeatAdultEvent: null,
     defeatAftermath: null,
     professions: createInitialProfessions(),
     equipment: initialEquipment,
@@ -1408,7 +1927,8 @@ export function createNewPlayerState(
     equippedBagId: 'backpack_traveler',
     campProgress: { ...INITIAL_CAMP_PROGRESS },
     campActionPoints: 3,
-    companions: [],
+    companions: createTestingPetCompanions(),
+    equippedPetId: null,
     companionNeedQueue: [],
     dragonkinState: race === 'DRAGONKIN' ? { hunterThreat: 10, hunterEncounterCount: 0 } : undefined,
     airship: { ...DEFAULT_AIRSHIP_STATE },
@@ -1427,14 +1947,16 @@ export function createNewPlayerState(
       ...Object.fromEntries(Object.keys(QUEST_DATABASE).filter((id)=>id.startsWith('guide_')&&id!=='guide_airship_flight'&&id!=='guide_recruitment').map((id)=>[id,{questId:id,status:'OFFERED' as const,currentStageId:1,objectives:{}}])),
     },
     trackedQuestId: 'quest_main_awakening',
+    questAlertQuestIds: Object.keys(QUEST_DATABASE).filter((id) => id.startsWith('guide_') && id !== 'guide_airship_flight' && id !== 'guide_recruitment'),
     declinedQuestIds: [],
+    factionReputation: {},
     skillProgression: createInitialSkillProgression(),
     fate: { fateId: 'fate_human_01', startingRegionId: 'GRANDIA', startingHexId: 'SURFACE:-12:0', resolved: false, status: 'IN_PROGRESS', currentChapterId: 'fate_human_01_chapter_1', completedChapterIds: [], choiceHistory: [], fateFlags: ['FATE_HUMAN_01_START'], permanentRewardIds: [], startedAtDay: 1, startedAtDialogue: 0 },
     worldMap: createInitialWorldMapState('THE_PELLESS_LOWER', raceDef.storyFlags),
     dungeonExploration: null,
     dungeonRecords: {},
     adultStatus:
-      fullProfile.physicalAge >= 18
+      isAdultPhysicalAge(fullProfile.physicalAge)
         ? {
             desire: 0,
             effectiveDesire: 0,
@@ -1454,7 +1976,9 @@ export function createNewPlayerState(
     restraints: [],
     adultNarrativeQueue: [],
     bodyPayloads: [],
+    eggCohorts: [],
     parasiteStates: [],
+    pheromoneState: createEmptyPheromoneState(),
     bladderStatus: { amount: 0, capacity: BLADDER_CONFIG.capacity, urge: 0, productionPerMinute: BLADDER_CONFIG.productionPerMinute },
     pregnancy: undefined,
     dialogueCount: 0,
@@ -1572,6 +2096,7 @@ export function sanitizePlayerState(inputState: any): PlayerState {
 
   const race: Race = state?.race || 'HUMAN';
   const beastkinType: BeastkinType | undefined = state?.beastkinType;
+  const raceDef = getRaceDefinition(race, beastkinType);
 
   const baseStats: PlayerStats = {
     strength: Number(state?.baseStats?.strength ?? state?.stats?.strength ?? 5),
@@ -1605,12 +2130,155 @@ export function sanitizePlayerState(inputState: any): PlayerState {
   const sanity = clamp(Number(state?.sanity ?? maxSanity), 0, maxSanity);
   const majorCharacters = { ...INITIAL_MAJOR_CHARACTERS, ...(state?.majorCharacters || {}) };
   for (const [characterId, defaultCharacter] of Object.entries(INITIAL_MAJOR_CHARACTERS)) {
-    const patchQuestIds = (defaultCharacter.customQuestIds || []).filter((id) => id.startsWith('quest_v205_'));
+    const patchQuestIds = (defaultCharacter.customQuestIds || []).filter((id) => id.startsWith('quest_v205_') || id.startsWith('quest_fate_'));
     if (patchQuestIds.length === 0) continue;
     const savedCharacter = majorCharacters[characterId];
     const savedQuestIds = Array.isArray(savedCharacter?.customQuestIds) ? savedCharacter.customQuestIds : [];
-    if (savedQuestIds.length === 0) majorCharacters[characterId] = { ...savedCharacter, customQuestIds: [...patchQuestIds] };
+    const mergedQuestIds = Array.from(new Set([...savedQuestIds, ...patchQuestIds]));
+    if (mergedQuestIds.length !== savedQuestIds.length) majorCharacters[characterId] = { ...savedCharacter, customQuestIds: mergedQuestIds };
   }
+
+  const inventory = (Array.isArray(state?.inventory) ? state.inventory : []).map((item: InventoryItem) => {
+    const enriched = enrichInventoryItem(item);
+    const bagDef = getBagDefinition(item.bagId || item.id || item.name);
+    return { ...item, id: item.id || enriched.id, bagId: item.bagId || bagDef?.id, category: item.category || (bagDef ? 'EQUIPMENT' : enriched.category), description: item.description || enriched.description, flavorText: item.flavorText || enriched.flavorText, illustrationUrl: item.illustrationUrl || enriched.illustrationUrl };
+  });
+  const savedQuests: Record<string, QuestProgress> = state?.quests && typeof state.quests === 'object' ? state.quests : {};
+  const quests: Record<string, QuestProgress> = Object.keys(savedQuests).length > 0
+    ? savedQuests
+    : {
+        quest_main_awakening: { questId: 'quest_main_awakening', status: 'ACTIVE', currentStageId: 1, objectives: {}, startedAt: Date.now() },
+        ...Object.fromEntries(Object.keys(QUEST_DATABASE).filter((id) => id.startsWith('guide_') && id !== 'guide_airship_flight' && id !== 'guide_recruitment').map((id) => [id, { questId: id, status: 'OFFERED' as const, currentStageId: 1, objectives: {} }])),
+      };
+  const questAlertQuestIds = Array.isArray(state?.questAlertQuestIds)
+    ? Array.from(new Set(state.questAlertQuestIds.filter((id: string) => Boolean(quests[id]))))
+    : Object.values(quests).filter((q) => q.status === 'OFFERED').map((q) => q.questId);
+  const rawTravelSession = worldMap.travelSession && typeof worldMap.travelSession === 'object' ? worldMap.travelSession : null;
+  const normalizedTravelSession = rawTravelSession?.active ? {
+    ...rawTravelSession,
+    status: rawTravelSession.status === 'ENCOUNTER_PAUSED' ? 'ENCOUNTER_PAUSED' as const : 'MOVING' as const,
+    currentPathIndex: Math.max(0, Math.floor(Number(rawTravelSession.currentPathIndex ?? rawTravelSession.completedHexSteps ?? 0))),
+    pausedAtHexId: rawTravelSession.status === 'ENCOUNTER_PAUSED'
+      ? (rawTravelSession.pausedAtHexId || worldMap.activeEncounterHexId || worldMap.currentHexId)
+      : undefined,
+  } : null;
+  let normalizedWorldMap = {
+    ...worldMap,
+    travelSession: normalizedTravelSession,
+    activeEncounterHexId: state?.activeEncounterId ? (worldMap.activeEncounterHexId || worldMap.currentHexId) : null,
+  };
+  // 4.0.1 구세이브 보정: 예전 여행 시스템은 인카운터가 진행 중이어도 currentHexId가
+  // 직전 Hex에 남아 있을 수 있었다. 활성 여행 사건/전투를 불러오면 현재 unit의 실제 Hex로 즉시 맞춘다.
+  if (normalizedTravelSession?.active && (state?.activeEncounterId || state?.activeBattle)) {
+    const activeUnit = normalizedTravelSession.encounters?.[normalizedTravelSession.currentEncounterIndex];
+    const activeTile = activeUnit ? WORLD_HEX_TILES[activeUnit.tileId] : undefined;
+    if (activeTile) {
+      normalizedWorldMap = {
+        ...normalizedWorldMap,
+        currentHexId: activeTile.id,
+        currentRegionId: activeTile.regionId,
+        currentLayer: activeTile.layer,
+        activeEncounterHexId: state?.activeEncounterId ? activeTile.id : normalizedWorldMap.activeEncounterHexId,
+        discoveredHexIds: Array.from(new Set([...(normalizedWorldMap.discoveredHexIds || []), activeTile.id])),
+        exploredHexIds: Array.from(new Set([...(normalizedWorldMap.exploredHexIds || []), activeTile.id])),
+        travelSession: {
+          ...normalizedTravelSession,
+          status: 'ENCOUNTER_PAUSED',
+          currentPathIndex: activeUnit.pathIndex,
+          pausedAtHexId: activeTile.id,
+        },
+      };
+    }
+  }
+
+  const equipment: EquippedItems = state?.equipment && typeof state.equipment === 'object'
+    ? { ...createInitialEquippedItems(), ...state.equipment }
+    : createInitialEquippedItems();
+  const professions: ProfessionProgress[] = Array.isArray(state?.professions) && state.professions.length > 0
+    ? state.professions.map((prof: ProfessionProgress) => ({ ...prof, learnedRecipes: Array.isArray(prof.learnedRecipes) ? prof.learnedRecipes : [], learnedPerks: Array.isArray(prof.learnedPerks) ? prof.learnedPerks : [], skillPoints: Math.max(0, Number(prof.skillPoints) || 0) }))
+    : createInitialProfessions();
+  const campProgress = normalizeCampProgress(state?.campProgress);
+  const companions: CompanionData[] = (Array.isArray(state?.companions) ? state.companions : []).map((c: CompanionData) => {
+    const kind = c.kind === 'PET' ? 'PET' : 'HUMANOID';
+    const linkedMajorCharacter = (Object.values(majorCharacters) as any[]).find((m) => m.id === c.id || m.companionId === c.id);
+    const legacyTrust = Number(c.bond?.trust ?? c.trust ?? linkedMajorCharacter?.trust ?? 0);
+    const legacyAffection = Number(c.bond?.affection ?? linkedMajorCharacter?.relationship ?? legacyTrust);
+    const bond = {
+      bondLevel: 1,
+      bondExp: 0,
+      trust: clamp(legacyTrust, 0, 100),
+      affection: clamp(legacyAffection, 0, 100),
+      personalFlags: {},
+      ...(c.bond || {}),
+    };
+
+    const common: CompanionData = {
+      ...c,
+      kind,
+      petState: kind === 'PET' ? normalizePetState(c.petState) : undefined,
+      needs: normalizeCompanionNeeds(c.needs || createInitialCompanionNeeds()),
+      equippedBagId: c.equippedBagId !== undefined ? c.equippedBagId : null,
+      bond: {
+        ...bond,
+        trust: clamp(Number(bond.trust) || 0, 0, 100),
+        affection: clamp(Number(bond.affection) || 0, 0, 100),
+      },
+      professions: Array.isArray(c.professions) ? c.professions : [],
+      equipment: c.equipment && typeof c.equipment === 'object' ? { ...createInitialEquippedItems(), ...c.equipment } : createInitialEquippedItems(),
+      equipmentEnhancements: c.equipmentEnhancements && typeof c.equipmentEnhancements === 'object' ? c.equipmentEnhancements : {},
+      learnedTalents: c.learnedTalents && typeof c.learnedTalents === 'object' ? c.learnedTalents : {},
+      learnedSkills: Array.isArray(c.learnedSkills) ? c.learnedSkills : ['basic_attack'],
+      combatTactic: c.combatTactic || 'BALANCED',
+      isActivePartyMember: Boolean(c.isActivePartyMember),
+    };
+
+    // 기존 사람형 동료만 성인/성별 마이그레이션 규칙을 적용한다. 펫에 인간형 메타데이터를 강제하지 않는다.
+    if (kind === 'HUMANOID') {
+      common.gender = '남성';
+      common.physicalAge = normalizeAdultHumanoidPhysicalAge(c.physicalAge);
+    }
+
+    return common;
+  });
+  if (PET_TEST_UNLOCK_ALL) {
+    for (const speciesId of Object.keys(PET_SPECIES_DATABASE) as import('./types').PetSpeciesId[]) {
+      if (!companions.some((c) => c.kind === 'PET' && c.petState?.speciesId === speciesId)) {
+        companions.push(createPetCompanionData(speciesId, { id: `test_pet_${speciesId.toLowerCase()}`, active: false }));
+      }
+    }
+  }
+  const equippedPetId = typeof state?.equippedPetId === 'string'
+    && companions.some((c) => c.id === state.equippedPetId && c.kind === 'PET' && c.petState)
+      ? state.equippedPetId
+      : null;
+
+  const currentHour = typeof state?.currentHour === 'number' ? clamp(Math.floor(state.currentHour), 0, 23) : getTimeOfDayMigrationHour(state?.timeOfDay);
+  const currentMinute = typeof state?.currentMinute === 'number' ? clamp(Math.floor(state.currentMinute), 0, 59) : 0;
+  const dayCount = Math.max(1, Math.floor(Number(state?.dayCount) || 1));
+  const timeOfDay = getTimeOfDayFromHour(currentHour);
+  const airship = state?.airship && typeof state.airship === 'object'
+    ? { ...DEFAULT_AIRSHIP_STATE, ...state.airship, unlockedUpgradeIds: Array.isArray(state.airship.unlockedUpgradeIds) ? state.airship.unlockedUpgradeIds : [] }
+    : { ...DEFAULT_AIRSHIP_STATE };
+  const corruptionStatus = {
+    corruption: clamp(Number(state?.corruptionStatus?.corruption ?? 0), 0, 10),
+    effectiveCorruption: clamp(Number(state?.corruptionStatus?.effectiveCorruption ?? state?.corruptionStatus?.corruption ?? 0), 0, 10),
+  };
+  const pheromoneState = state?.pheromoneState && typeof state.pheromoneState === 'object'
+    ? {
+        ...createEmptyPheromoneState(),
+        INSECTOID: { ...createEmptyPheromoneState().INSECTOID, ...(state.pheromoneState.INSECTOID || {}) },
+        TENTACLE: { ...createEmptyPheromoneState().TENTACLE, ...(state.pheromoneState.TENTACLE || {}) },
+      }
+    : createEmptyPheromoneState();
+  const bladderCapacity = Math.max(1, Number(state?.bladderStatus?.capacity ?? BLADDER_CONFIG.capacity));
+  const bladderStatus = state?.bladderStatus && typeof state.bladderStatus === 'object'
+    ? {
+        amount: clamp(Number(state.bladderStatus.amount ?? 0), 0, bladderCapacity),
+        capacity: bladderCapacity,
+        urge: clamp(Number(state.bladderStatus.urge ?? 0), 0, 100),
+        productionPerMinute: Math.max(0, Number(state.bladderStatus.productionPerMinute ?? BLADDER_CONFIG.productionPerMinute)),
+      }
+    : { amount: 0, capacity: BLADDER_CONFIG.capacity, urge: 0, productionPerMinute: BLADDER_CONFIG.productionPerMinute };
 
   return {
     ...state,
@@ -1618,6 +2286,9 @@ export function sanitizePlayerState(inputState: any): PlayerState {
     experience: Math.max(0, Number(state?.experience) || 0),
     statPoints: Math.max(0, Number(state?.statPoints) || 0),
     talentPoints: Math.max(0, Number(state?.talentPoints) || 0),
+    rupees: Math.max(0, Number(state?.rupees) || 0),
+    commerce: normalizeCommerceRuntimeState(state?.commerce),
+    settlementState: normalizeSettlementRuntimeState(state?.settlementState),
     baseStats,
     stats: effectiveStats,
     hp,
@@ -1627,13 +2298,66 @@ export function sanitizePlayerState(inputState: any): PlayerState {
     sanity,
     maxSanity,
     skillProgression: progressionState,
-    worldMap,
+    worldMap: normalizedWorldMap,
     majorCharacters,
+    quests,
+    questAlertQuestIds,
+    factionReputation: state?.factionReputation && typeof state.factionReputation === 'object' ? { ...state.factionReputation } : {},
+    passives: Array.isArray(state?.passives) && state.passives.length > 0 ? state.passives : raceDef.passiveIds,
+    storyFlags: Array.isArray(state?.storyFlags) && state.storyFlags.length > 0 ? state.storyFlags : raceDef.storyFlags,
+    isCharacterCreated: state?.isCharacterCreated ?? true,
+    characterName: state?.characterName || state?.profile?.inGameName || state?.profile?.name || '모험가',
+    combatClass: state?.combatClass || 'NONE',
+    classEvolutionTier: Math.max(1, Number(state?.classEvolutionTier) || 1),
+    learnedSkills: Array.from(new Set([...(Array.isArray(state?.learnedSkills) && state.learnedSkills.length > 0 ? state.learnedSkills : ['basic_attack','defend_stance','first_aid']), ...(race === 'DRAGONKIN' ? ['dragonkin_sacred_breath','dragonkin_scale_guard'] : [])])),
+    activeBattle: state?.activeBattle || null,
+    defeatAdultEvent: state?.defeatAdultEvent?.active ? state.defeatAdultEvent : null,
+    defeatAftermath: state?.defeatAftermath || null,
+    equipment,
+    equipmentEnhancements: state?.equipmentEnhancements && typeof state.equipmentEnhancements === 'object' ? Object.fromEntries(Object.entries(state.equipmentEnhancements).map(([id, value]) => [id, normalizeEquipmentEnhancementState(value as any)])) : {},
+    equippedBagId: state?.equippedBagId !== undefined ? state.equippedBagId : 'backpack_traveler',
+    professions,
+    campProgress,
+    campActionPoints: Math.max(0, Number(state?.campActionPoints ?? 3)),
+    companions,
+    equippedPetId,
+    companionNeedQueue: Array.isArray(state?.companionNeedQueue) ? state.companionNeedQueue : [],
+    airship,
+    timeOfDay,
+    dayCount,
+    currentHour,
+    currentMinute,
+    unlockedLocks: Array.isArray(state?.unlockedLocks) ? state.unlockedLocks : [],
+    encounters: state?.encounters && typeof state.encounters === 'object' ? state.encounters : {},
+    scheduledEncounters: Array.isArray(state?.scheduledEncounters) ? state.scheduledEncounters : [],
+    trackedQuestId: state?.trackedQuestId || 'quest_main_awakening',
+    declinedQuestIds: Array.isArray(state?.declinedQuestIds) ? state.declinedQuestIds : [],
+    inventory,
+    activePotionEffects: Array.isArray(state?.activePotionEffects)
+      ? state.activePotionEffects.filter((effect: any) => effect && effect.statusEffectId && Number(effect.remainingMinutes) > 0).map((effect: any) => ({
+          statusEffectId: String(effect.statusEffectId),
+          sourceItemId: String(effect.sourceItemId || ''),
+          name: String(effect.name || effect.statusEffectId),
+          remainingMinutes: Math.max(1, Math.floor(Number(effect.remainingMinutes) || 0)),
+        }))
+      : [],
+    explorationConditions: Array.isArray(state?.explorationConditions) ? Array.from(new Set(state.explorationConditions.filter(Boolean).map(String))) : [],
     fate,
     dungeonExploration: state?.dungeonExploration || null,
     dungeonRecords: state?.dungeonRecords && typeof state.dungeonRecords === 'object' ? state.dungeonRecords : {},
     dragonkinState: race === 'DRAGONKIN' ? { hunterThreat: Math.max(0, Math.min(100, Number(state?.dragonkinState?.hunterThreat ?? 10))), hunterEncounterCount: Math.max(0, Math.floor(Number(state?.dragonkinState?.hunterEncounterCount ?? 0))) } : undefined,
-    profile: { ...DEFAULT_CHARACTER_PROFILE, ...(state?.profile || {}), gender: '여성', race, beastkinType: race === 'BEASTKIN' ? (state?.profile?.beastkinType || beastkinType || 'CAT') : undefined },
+    corruptionStatus,
+    tattoos: Array.isArray(state?.tattoos) ? state.tattoos : [],
+    restraints: Array.isArray(state?.restraints) ? state.restraints : [],
+    adultNarrativeQueue: Array.isArray(state?.adultNarrativeQueue) ? state.adultNarrativeQueue : [],
+    bodyPayloads: normalizeSavedBodyPayloads(state?.bodyPayloads),
+    eggCohorts: Array.isArray(state?.eggCohorts) ? state.eggCohorts : [],
+    parasiteStates: Array.isArray(state?.parasiteStates) ? state.parasiteStates : [],
+    pheromoneState,
+    bladderStatus,
+    pregnancy: state?.pregnancy?.active ? state.pregnancy : undefined,
+    dialogueCount: Math.max(0, Number(state?.dialogueCount) || 0),
+    profile: { ...DEFAULT_CHARACTER_PROFILE, ...(state?.profile || {}), height: Number(state?.profile?.height ?? DEFAULT_CHARACTER_PROFILE.height), build: state?.profile?.build ?? DEFAULT_CHARACTER_PROFILE.build, breastSize: state?.profile?.breastSize ?? DEFAULT_CHARACTER_PROFILE.breastSize, hipSize: state?.profile?.hipSize ?? DEFAULT_CHARACTER_PROFILE.hipSize, gender: '여성', race, beastkinType: race === 'BEASTKIN' ? (state?.profile?.beastkinType || beastkinType || 'CAT') : undefined },
     learnedTalents,
     talents: {
       ...(state?.talents || {}),
@@ -1774,8 +2498,13 @@ export function evolveCombatClass(state: PlayerState, evolutionId?: string): Pla
 // ============================================================
 
 function playerOwnsEquipmentDefinition(state: PlayerState, equipmentId: string): boolean {
+  const def = EQUIPMENT_DATABASE[equipmentId];
   return Object.values(state.equipment || {}).includes(equipmentId) ||
-    (state.inventory || []).some((item) => item.equipmentId === equipmentId && item.quantity > 0);
+    (state.inventory || []).some((item) => item.quantity > 0 && (
+      item.equipmentId === equipmentId ||
+      item.id === equipmentId ||
+      (!!def && item.name === def.name)
+    ));
 }
 
 export function enhanceEquipment(
@@ -1836,6 +2565,14 @@ export function equipItemToSlot(
   const itemDef = EQUIPMENT_DATABASE[equipmentId];
   if (!itemDef) {
     return { nextState: state, message: '존재하지 않는 장비입니다.' };
+  }
+
+  // UI 필터를 우회해 호출하더라도 잘못된 슬롯/레벨 장비를 강제로 착용할 수 없게 엔진에서 검증한다.
+  if (itemDef.slot !== slot) {
+    return { nextState: state, message: `${itemDef.name}은(는) [${itemDef.slot}] 슬롯 전용 장비입니다.` };
+  }
+  if ((itemDef.requiredLevel ?? 1) > (state.level ?? 1)) {
+    return { nextState: state, message: `${itemDef.name} 장착에는 Lv.${itemDef.requiredLevel}이 필요합니다.` };
   }
 
   let inventory = [...state.inventory];
@@ -1900,18 +2637,12 @@ export function equipItemToSlot(
 
   equipment[slot] = equipmentId;
 
-  // 장비 스탯 갱신 및 마법 무기 스킬 연동
-  let learnedSkills = [...state.learnedSkills];
-  const grantedSpell = (itemDef as any).magicData?.grantedSpellId || itemDef.magicWeapon?.grantedSkillId;
-  if (grantedSpell && !learnedSkills.includes(grantedSpell)) {
-    learnedSkills.push(grantedSpell);
-  }
-
+  // 장비가 부여하는 스킬은 전투 Actor 생성 시 현재 장착 장비에서만 계산한다.
+  // learnedSkills에 영구 추가하면 장비를 한 번 착용한 뒤 해제해도 스킬이 남는 누수가 발생한다.
   let nextState: PlayerState = {
     ...state,
     equipment,
     inventory,
-    learnedSkills,
   };
 
   // 장비 변경으로 현재 음란도 등 파생 성인 상태 재계산
@@ -1951,8 +2682,41 @@ export function useInventoryItem(
   }
 
   const def = getItemDefinition(item.id || item.name);
+  const inferredMeta = inferItemMetadata(item.id || item.name, item.description);
+  const potionDef = POTION_DATABASE[item.id || ''] || Object.values(POTION_DATABASE).find((potion) => potion.name === item.name);
+  // 이 함수는 인벤토리/탐험용 비전투 사용 경로다. 전투 전용 비약은 전투 아이템 UI에서만 소비한다.
+  if (potionDef?.usableContext === 'COMBAT_ONLY') {
+    return { nextState: state, success: false, message: `[${potionDef.name}]은(는) 전투 중에만 사용할 수 있습니다.` };
+  }
+  if (potionDef?.gameplayEffect.resurrectRatio && state.hp > 0) {
+    return { nextState: state, success: false, message: `[${potionDef.name}]은(는) 전투 패배/사망 시 부활 처리에서 사용됩니다.` };
+  }
+
+  // 선물 아이템은 대상 없이 일반 사용으로 소비되면 안 된다.
+  if (def?.giftValue) {
+    if (!targetCharacterId) {
+      return { nextState: state, success: false, message: '선물 아이템은 주요 인물 창에서 직접 만난 인물에게 사용해 주세요.' };
+    }
+    const giftTarget = state.majorCharacters?.[targetCharacterId];
+    const hasMet = Boolean(giftTarget?.hasMet || (giftTarget?.interactionHistory?.length || 0) > 0);
+    if (!giftTarget || !giftTarget.isAlive || !hasMet) {
+      return { nextState: state, success: false, message: '아직 실제로 조우하지 않은 인물에게는 선물할 수 없습니다.' };
+    }
+    if (!giftTarget.currentHexId || giftTarget.currentHexId !== state.worldMap?.currentHexId) {
+      return { nextState: state, success: false, message: `${giftTarget.name}와(과) 현재 같은 장소에 있지 않아 선물할 수 없습니다.` };
+    }
+  }
+
   let nextState = { ...state };
   const summaries: string[] = [];
+
+  // 동적 보물지도/지도 아이템도 실제 용도를 가진다. 현재 Hex 주변 탐사 정보를 넓히고 단서를 기록한다.
+  const isMapItem = (def?.category || item.category || inferredMeta.category) === 'MAP' || /지도|해도|항로도/.test(item.name);
+  if (isMapItem) {
+    nextState = revealAround(nextState, nextState.worldMap.currentHexId, 2);
+    nextState = { ...nextState, storyFlags: Array.from(new Set([...(nextState.storyFlags || []), `MAP_READ:${def?.id || item.id || item.name}`])) };
+    summaries.push('주변 지도 정보가 갱신되었습니다.');
+  }
 
   // 기본 효과 산출
   let hpHeal = 0;
@@ -1960,7 +2724,32 @@ export function useInventoryItem(
   let sanityHeal = 0;
   let customMsg = '';
 
-  if (def?.useEffect) {
+  if (potionDef) {
+    const effect = potionDef.gameplayEffect || {};
+    // 숙면 물약은 즉시 999 회복하는 약이 아니라 '다음 야영 수면 완전 회복' 예약 효과다.
+    hpHeal = potionDef.id === 'potion_deep_sleep' ? 0 : (effect.hpDelta || 0);
+    if ((effect.hpPercent || 0) > 0) hpHeal += Math.round(nextState.maxHp * (effect.hpPercent || 0));
+    mpHeal = effect.mpDelta || 0;
+    sanityHeal = potionDef.id === 'potion_deep_sleep' ? 0 : (effect.sanityDelta || 0);
+    customMsg = potionDef.effectLogText || potionDef.actionLogText;
+
+    const durationMinutes = Math.max(0, Number(effect.durationMinutes ?? potionDef.durationMinutes ?? 0));
+    if (durationMinutes > 0 && potionDef.statusEffectId) {
+      const others = (nextState.activePotionEffects || []).filter((entry) => entry.statusEffectId !== potionDef.statusEffectId);
+      nextState.activePotionEffects = [...others, { statusEffectId: potionDef.statusEffectId, sourceItemId: potionDef.id, name: potionDef.name, remainingMinutes: durationMinutes }];
+      summaries.push(`${potionDef.gameplayEffect.buffName || potionDef.name} ${durationMinutes}분`);
+    }
+    if ((effect.energyDelta || 0) > 0) {
+      // 별도 피로 수치가 없는 현 버전에서는 탐험/야영 행동 여력을 회복시키는 실제 자원으로 연결한다.
+      const recovered = Math.max(1, Math.ceil((effect.energyDelta || 0) / 20));
+      const before = nextState.campActionPoints || 0;
+      nextState.campActionPoints = Math.min(3, before + recovered);
+      if (nextState.campActionPoints > before) summaries.push(`행동 여력 +${nextState.campActionPoints - before}`);
+    }
+    if (effect.detoxPoison) nextState.explorationConditions = (nextState.explorationConditions || []).filter((condition) => !/POISON|TOXIN/i.test(condition));
+    if (effect.healBleeding) nextState.explorationConditions = (nextState.explorationConditions || []).filter((condition) => !/BLEED/i.test(condition));
+    if (effect.cureDisease) nextState.explorationConditions = (nextState.explorationConditions || []).filter((condition) => !/DISEASE|INFECTION|FEVER/i.test(condition));
+  } else if (def?.useEffect) {
     hpHeal = def.useEffect.hpDelta || 0;
     mpHeal = def.useEffect.mpDelta || 0;
     sanityHeal = def.useEffect.sanityDelta || 0;
@@ -2001,7 +2790,7 @@ export function useInventoryItem(
   }
 
   // 아이템 소모 처리 (소비형인 경우 기본 1개 소모)
-  const consumed = def ? (def.consumedOnUse !== false) : true;
+  const consumed = isMapItem ? false : (def ? (def.consumedOnUse !== false) : true);
   if (consumed) {
     const rmRes = removeItem(nextState.inventory, item.name, 1);
     nextState.inventory = rmRes.inventory;
@@ -2032,7 +2821,7 @@ export function useInventoryItem(
     summaries.push(...evRes.messages);
   }
 
-  const finalMsg = customMsg || `🧪 [${item.name}]을(를) 사용했습니다. (${summaries.join(', ') || '효과 발동'})`;
+  const finalMsg = customMsg || `${isMapItem ? '🗺️' : '🧪'} [${item.name}]을(를) 사용했습니다. (${summaries.join(', ') || '효과 발동'})`;
 
   return {
     nextState,
@@ -2084,14 +2873,10 @@ export function attemptUnlockLock(
       if (!lockDef.keyItemId) {
         return { nextState: state, success: false, message: '맞는 열쇠가 지정되지 않았습니다.' };
       }
-      const hasKey = nextState.inventory.find(
-        (i) =>
-          (i.id && i.id === lockDef.keyItemId) ||
-          i.equipmentId === lockDef.keyItemId ||
-          i.name.includes('열쇠') ||
-          i.name.includes('인장') ||
-          i.name.includes('수정구')
-      );
+      const hasKey = nextState.inventory.find((i) => {
+        const itemDef = getItemDefinition(i.id || i.name);
+        return (i.id && i.id === lockDef.keyItemId) || itemDef?.id === lockDef.keyItemId;
+      });
       if (!hasKey) {
         return {
           nextState: state,
@@ -2164,6 +2949,14 @@ export function attemptUnlockLock(
           message: `${char?.name || '인물'}의 신뢰도가 부족합니다. (현재: ${char?.trust || 0} / 필요: ${reqTrust})`,
         };
       }
+      const hasMet = Boolean(char.hasMet || (char.interactionHistory?.length || 0) > 0);
+      if (!hasMet || !char.currentHexId || char.currentHexId !== nextState.worldMap?.currentHexId) {
+        return {
+          nextState: state,
+          success: false,
+          message: `${char.name}의 승인이 필요하지만 현재 같은 장소에 있지 않습니다.`,
+        };
+      }
       isSuccess = true;
       methodMsg = `📜 ${char.name}의 공식 승인과 협조를 얻어`;
       break;
@@ -2204,6 +2997,16 @@ export function attemptUnlockLock(
 
   const rewardSummaries: string[] = [];
 
+  // 먼저 잠금 해제 이벤트를 커밋한다. 잠금 보상으로 획득하는 아이템이 다음 퀘스트 단계의
+  // GAIN_ITEM 목표라면, 단계 전환 뒤 ITEM_GAINED 이벤트를 받아야 정상 진행된다.
+  const evRes = dispatchGameEvent(nextState, 'LOCK_UNLOCKED', {
+    lockId,
+    lockName: lockDef.name,
+    unlockMethod: method,
+  });
+  nextState = evRes.nextState;
+  if (evRes.messages.length > 0) rewardSummaries.push(...evRes.messages);
+
   // 보상 지급
   if (lockDef.rewards) {
     const rw = lockDef.rewards;
@@ -2221,17 +3024,6 @@ export function attemptUnlockLock(
       nextState.storyFlags = Array.from(flags);
       rewardSummaries.push(`스토리 플래그 활성화: ${rw.storyFlags.join(', ')}`);
     }
-  }
-
-  // LOCK_UNLOCKED GameEvent 디스패치
-  const evRes = dispatchGameEvent(nextState, 'LOCK_UNLOCKED', {
-    lockId,
-    lockName: lockDef.name,
-    unlockMethod: method,
-  });
-  nextState = evRes.nextState;
-  if (evRes.messages.length > 0) {
-    rewardSummaries.push(...evRes.messages);
   }
 
   const successMessage = `🔓 ${methodMsg} [${lockDef.name}]을(를) 성공적으로 해제했습니다!\n${rewardSummaries.map((s) => `• ${s}`).join('\n')}`;
@@ -2405,19 +3197,27 @@ export function craftRecipe(
   let newProfLevel = 1;
   const updatedProfessions = state.professions.map((p) => {
     if (p.professionId === recipe.professionId) {
-      const nextExp = p.exp + recipe.expReward;
-      const neededExp = p.level * 100;
-      if (nextExp >= neededExp) {
-        leveledUp = true;
-        newProfLevel = p.level + 1;
-        return {
-          ...p,
-          level: Math.min(60, p.level + 1),
-          exp: p.level >= 60 ? 0 : nextExp - neededExp,
-          skillPoints: (p.skillPoints ?? 0) + (p.level < 60 ? 1 : 0),
-        };
+      let nextExp = (p.exp || 0) + recipe.expReward;
+      let nextLevel = p.level || 1;
+      let earnedSkillPoints = 0;
+      while (nextLevel < 60) {
+        const neededExp = nextLevel * 100;
+        if (nextExp < neededExp) break;
+        nextExp -= neededExp;
+        nextLevel += 1;
+        earnedSkillPoints += 1;
       }
-      return { ...p, exp: nextExp };
+      if (nextLevel >= 60) nextExp = 0;
+      if (nextLevel > p.level) {
+        leveledUp = true;
+        newProfLevel = nextLevel;
+      }
+      return {
+        ...p,
+        level: nextLevel,
+        exp: nextExp,
+        skillPoints: (p.skillPoints ?? 0) + earnedSkillPoints,
+      };
     }
     return p;
   });
@@ -2542,6 +3342,9 @@ export function upgradeCampFacility(
   const updatedFacilities = state.campProgress.facilities.map((f) =>
     f.facilityId === facilityId ? { ...f, level: targetLvl, isBuilt: true } : f
   );
+  if (!currentProgress) {
+    updatedFacilities.push({ facilityId, level: targetLvl, isBuilt: true });
+  }
 
   let nextState: PlayerState = {
     ...state,
@@ -2553,8 +3356,9 @@ export function upgradeCampFacility(
     },
   };
 
-  // CAMP_FACILITY_BUILT 이벤트 디스패치
-  const facilityEv = dispatchGameEvent(nextState, 'CAMP_FACILITY_BUILT', {
+  // 최초 건설과 증축을 구분해 퀘스트/로그 이벤트가 정확히 반응하도록 한다.
+  const facilityEventType = currentLvl <= 0 ? 'CAMP_FACILITY_BUILT' : 'CAMP_FACILITY_UPGRADED';
+  const facilityEv = dispatchGameEvent(nextState, facilityEventType, {
     facilityId,
     newLevel: targetLvl,
   });
@@ -2617,6 +3421,11 @@ export function performCampSleep(state: PlayerState): { nextState: PlayerState; 
     mpRestore = state.maxMana;
     sanityRestore = state.maxSanity;
   }
+  if (hasActivePotionEffect(state, 'status_potion_deep_sleep')) {
+    hpRestore = state.maxHp;
+    mpRestore = state.maxMana;
+    sanityRestore = state.maxSanity;
+  }
 
   const currentHour =
     typeof state.currentHour === 'number'
@@ -2644,6 +3453,13 @@ export function performCampSleep(state: PlayerState): { nextState: PlayerState; 
 
   // 날짜/시각 + 감도/미약 시간 경과를 공통 엔진에서 정확히 한 번 처리합니다.
   nextState = advanceGameTime(nextState, elapsedSleepMinutes);
+
+  // 가이드/일반 퀘스트의 CAMP_SLEEP 목표가 실제 수면을 인식하도록 정식 이벤트를 발생시킨다.
+  const sleepEvent = dispatchGameEvent(nextState, 'CAMP_SLEEP', {
+    isRest: true,
+    elapsedMinutes: elapsedSleepMinutes,
+  });
+  nextState = sleepEvent.nextState;
 
   return {
     nextState,
@@ -3151,22 +3967,31 @@ export function recruitCompanion(
     return { nextState: state, message: `이미 [${companion.name}]은(는) 동료로 영입되어 있습니다.` };
   }
 
+  const kind = companion.kind === 'PET' ? 'PET' : 'HUMANOID';
   const bondObj = companion.bond || {
     bondLevel: companion.bondLevel || 1,
     bondExp: companion.bondExp || 0,
     trust: companion.trust || 30,
+    affection: companion.trust || 30,
     personalFlags: {},
+  };
+  const normalizedBond = {
+    ...bondObj,
+    trust: clamp(Number(bondObj.trust) || 0, 0, 100),
+    affection: clamp(Number(bondObj.affection ?? bondObj.trust) || 0, 0, 100),
   };
 
   companions.push({
     ...companion,
-    gender: '남성',
-    physicalAge: Math.max(18, Number(companion.physicalAge ?? 20)),
+    kind,
+    petState: kind === 'PET' ? normalizePetState(companion.petState) : undefined,
+    gender: kind === 'HUMANOID' ? '남성' : companion.gender,
+    physicalAge: kind === 'HUMANOID' ? normalizeAdultHumanoidPhysicalAge(companion.physicalAge) : companion.physicalAge,
     needs: normalizeCompanionNeeds(companion.needs || createInitialCompanionNeeds()),
-    bond: bondObj,
+    bond: normalizedBond,
     isActivePartyMember: companion.isActivePartyMember ?? true,
-    bondLevel: bondObj.bondLevel,
-    trust: bondObj.trust,
+    bondLevel: normalizedBond.bondLevel,
+    trust: normalizedBond.trust,
   });
 
   let nextState: PlayerState = {
@@ -3180,7 +4005,8 @@ export function recruitCompanion(
     majorChars[companion.id] = {
       ...majorChars[companion.id],
       isRecruited: true,
-      trust: Math.max(majorChars[companion.id].trust, companion.trust || 30),
+      trust: Math.max(majorChars[companion.id].trust, normalizedBond.trust),
+      relationship: Math.max(majorChars[companion.id].relationship, normalizedBond.affection),
     };
     nextState.majorCharacters = majorChars;
   }
@@ -3200,7 +4026,178 @@ export function recruitCompanion(
 }
 
 /**
+ * 3.3 펫 전용 영입 함수. 인간형 연령/성별 마이그레이션을 통과하지 않는다.
+ */
+export function recruitPet(
+  state: PlayerState,
+  speciesId: import('./types').PetSpeciesId,
+  options: { source: import('./types').PetAcquisitionSource; id?: string; name?: string; level?: number; appearance?: string; active?: boolean },
+): { nextState: PlayerState; message: string; petId: string } {
+  if (options?.source !== 'SHOP' && options?.source !== 'SPECIAL_ENCOUNTER') {
+    return { nextState: state, message: '펫은 상점 또는 특수 인카운터를 통해서만 획득할 수 있습니다.', petId: options?.id || '' };
+  }
+  const petId = options?.id || `pet_${speciesId.toLowerCase()}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  if ((state.companions || []).some(c => c.id === petId)) {
+    return { nextState: state, message: `이미 같은 ID의 펫이 존재합니다.`, petId };
+  }
+  const pet = createPetCompanionData(speciesId, { ...options, id: petId });
+  const recruited = recruitCompanion(state, pet);
+  return {
+    nextState: recruited.nextState,
+    message: `🐾 [펫 획득/${options.source === 'SHOP' ? '상점' : '특수 인카운터'}] ${pet.name}이(가) 동반자가 되었습니다!`,
+    petId,
+  };
+}
+
+/** 3.3: 전용 펫 장착 칸. 보유 중인 펫 하나만 장착하며 전투 파티 편성과는 별개다. */
+export function setEquippedPet(
+  state: PlayerState,
+  petId: string | null,
+): { nextState: PlayerState; message: string } {
+  if (petId === null) {
+    return { nextState: { ...state, equippedPetId: null }, message: '🐾 펫 장착을 해제했습니다.' };
+  }
+  const pet = (state.companions || []).find((c) => c.id === petId && c.kind === 'PET' && c.petState);
+  if (!pet) return { nextState: state, message: '장착할 수 있는 펫을 찾지 못했습니다.' };
+  return { nextState: { ...state, equippedPetId: petId }, message: `🐾 ${pet.name}을(를) 펫 장착 칸에 등록했습니다.` };
+}
+
+/** 3.3 펫 요청 응답 엔진 공개 래퍼. */
+export function respondPetRequest(
+  state: PlayerState,
+  petId: string,
+  response: 'ACCEPT' | 'REFUSE',
+): { nextState: PlayerState; message: string } {
+  return respondToPetNeedRequest(state, petId, response);
+}
+
+
+/** 3.3 3차: 펫 돌봄/훈련 공개 래퍼. */
+export function careForPet(
+  state: PlayerState,
+  petId: string,
+  action: import('./types').PetCareAction,
+): ReturnType<typeof performPetCare> {
+  return performPetCare(state, petId, action);
+}
+
+export function upgradePetMetabolismPerk(state: PlayerState, petId: string): ReturnType<typeof upgradePetMetabolism> {
+  return upgradePetMetabolism(state, petId);
+}
+
+/** 3.3 3차: 현재 친밀/충성/야생성을 명령 확률로 환산한다. */
+export function getPetBehaviorRates(pet: CompanionData): PetCommandRates {
+  return getPetCommandRates(pet);
+}
+
+/** 3.3 3차: 펫 명령 판정 공개 래퍼. */
+export function issuePetCommand(
+  state: PlayerState,
+  petId: string,
+  randomValue?: number,
+): { nextState: PlayerState; outcome?: PetCommandOutcome; message: string } {
+  return resolvePetCommand(state, petId, randomValue);
+}
+
+export function recordPetBattleCommandOutcome(state: PlayerState, petId: string, outcome: PetCommandOutcome): PlayerState {
+  return recordPetCommandOutcome(state, petId, outcome);
+}
+
+/** 3.3 4차: 인벤토리의 실제 먹이 아이템을 1개 소비해 펫에게 급여한다. */
+export function feedPet(state: PlayerState, petId: string, itemId: string) {
+  return feedPetItem(state, petId, itemId);
+}
+
+/** 3.3 4차: 현재 인벤토리에서 해당 펫에게 줄 수 있는 먹이만 반환한다. */
+export function getAvailablePetFoods(state: PlayerState, petId: string) {
+  return getPetFoodOptions(state, petId);
+}
+
+/**
  * 동료와의 신뢰도 및 유대 경험치를 갱신하고 COMPANION_BOND_CHANGED 이벤트를 발생시킵니다.
+ */
+export interface CompanionRelationshipChange {
+  trustDelta?: number;
+  affectionDelta?: number;
+  bondExpDelta?: number;
+}
+
+/**
+ * 3.3 관계 시스템의 정식 변경 함수.
+ * 신뢰도 / 호감도 / 유대 경험치를 서로 독립적으로 변경한다.
+ */
+export function modifyCompanionRelationship(
+  state: PlayerState,
+  companionId: string,
+  change: CompanionRelationshipChange,
+): { nextState: PlayerState; message: string } {
+  const trustDelta = Number(change.trustDelta || 0);
+  const affectionDelta = Number(change.affectionDelta || 0);
+  const bondExpDelta = Number(change.bondExpDelta || 0);
+  let companionName = companionId;
+
+  const companions = (state.companions || []).map((c) => {
+    if (c.id !== companionId) return c;
+    companionName = c.name;
+    const currentTrust = c.bond?.trust ?? c.trust ?? 0;
+    const currentAffection = c.bond?.affection ?? currentTrust;
+    const currentBondExp = c.bond?.bondExp ?? c.bondExp ?? 0;
+    let currentBondLevel = c.bond?.bondLevel ?? c.bondLevel ?? 1;
+
+    const nextTrust = clamp(currentTrust + trustDelta, 0, 100);
+    const nextAffection = clamp(currentAffection + affectionDelta, 0, 100);
+    const nextBondExp = Math.max(0, currentBondExp + bondExpDelta);
+    while (nextBondExp >= currentBondLevel * 100 && currentBondLevel < 10) currentBondLevel += 1;
+
+    const bond = {
+      ...(c.bond || { personalFlags: {} }),
+      trust: nextTrust,
+      affection: nextAffection,
+      bondExp: nextBondExp,
+      bondLevel: currentBondLevel,
+    };
+    return { ...c, bond, trust: nextTrust, bondExp: nextBondExp, bondLevel: currentBondLevel };
+  });
+
+  let nextState: PlayerState = { ...state, companions };
+  const majorEntry = Object.entries(nextState.majorCharacters || {}).find(([, m]) => m.id === companionId || m.companionId === companionId);
+  if (majorEntry) {
+    const [majorId, major] = majorEntry;
+    nextState = {
+      ...nextState,
+      majorCharacters: {
+        ...nextState.majorCharacters,
+        [majorId]: {
+          ...major,
+          trust: clamp(major.trust + trustDelta, 0, 100),
+          relationship: clamp(major.relationship + affectionDelta, -100, 100),
+        },
+      },
+    };
+  }
+
+  const evRes = dispatchGameEvent(nextState, 'COMPANION_BOND_CHANGED', {
+    companionId,
+    trustDelta,
+    affectionDelta,
+    bondExpDelta,
+  });
+  nextState = evRes.nextState;
+
+  const parts: string[] = [];
+  if (trustDelta) parts.push(`신뢰도 ${trustDelta >= 0 ? '+' : ''}${trustDelta}`);
+  if (affectionDelta) parts.push(`호감도 ${affectionDelta >= 0 ? '+' : ''}${affectionDelta}`);
+  if (bondExpDelta) parts.push(`유대 경험치 ${bondExpDelta >= 0 ? '+' : ''}${bondExpDelta}`);
+  return {
+    nextState,
+    message: `💖 [${companionName}]과의 관계가 변화했습니다.${parts.length ? ` (${parts.join(', ')})` : ''}`,
+  };
+}
+
+/**
+ * 3.2 호환 래퍼.
+ * 기존 호출부는 신뢰 변화가 호감도에도 함께 반영되던 의미를 유지한다.
+ * 3.3 신규 코드에서는 modifyCompanionRelationship()을 사용한다.
  */
 export function modifyCompanionBond(
   state: PlayerState,
@@ -3208,63 +4205,11 @@ export function modifyCompanionBond(
   trustDelta: number,
   bondExpDelta?: number
 ): { nextState: PlayerState; message: string } {
-  let companionName = companionId;
-  const companions = (state.companions || []).map((c) => {
-    if (c.id === companionId) {
-      companionName = c.name;
-      const currentTrust = c.bond?.trust ?? c.trust ?? 0;
-      const currentBondExp = c.bond?.bondExp ?? c.bondExp ?? 0;
-      let currentBondLevel = c.bond?.bondLevel ?? c.bondLevel ?? 1;
-
-      const nextTrust = clamp(currentTrust + trustDelta, 0, 100);
-      const nextBondExp = currentBondExp + (bondExpDelta || 0);
-      if (nextBondExp >= currentBondLevel * 100 && currentBondLevel < 10) {
-        currentBondLevel += 1;
-      }
-      const bond = {
-        ...(c.bond || { personalFlags: {} }),
-        trust: nextTrust,
-        bondExp: nextBondExp,
-        bondLevel: currentBondLevel,
-      };
-      return {
-        ...c,
-        bond,
-        trust: nextTrust,
-        bondExp: nextBondExp,
-        bondLevel: currentBondLevel,
-      };
-    }
-    return c;
-  });
-
-  let nextState: PlayerState = {
-    ...state,
-    companions,
-  };
-
-  // 주요 인물 호감도 동기화
-  if (nextState.majorCharacters?.[companionId]) {
-    const majorChars = { ...nextState.majorCharacters };
-    majorChars[companionId] = {
-      ...majorChars[companionId],
-      trust: clamp(majorChars[companionId].trust + trustDelta, 0, 100),
-      relationship: clamp(majorChars[companionId].relationship + trustDelta, -100, 100),
-    };
-    nextState.majorCharacters = majorChars;
-  }
-
-  // COMPANION_BOND_CHANGED 디스패치
-  const evRes = dispatchGameEvent(nextState, 'COMPANION_BOND_CHANGED', {
-    companionId,
+  return modifyCompanionRelationship(state, companionId, {
     trustDelta,
+    affectionDelta: trustDelta,
+    bondExpDelta: bondExpDelta || 0,
   });
-  nextState = evRes.nextState;
-
-  return {
-    nextState,
-    message: `💖 [${companionName}]과의 유대감이 변화했습니다. (신뢰도 ${trustDelta >= 0 ? '+' : ''}${trustDelta})`,
-  };
 }
 
 /**
@@ -3308,6 +4253,73 @@ export function enterLocation(
 }
 
 /**
+ * 진행 중인 일반 인카운터 안에서 발생한 실제 지리 이동을 월드맵 Hex에 반영합니다.
+ * 일반 인카운터와 여행 인카운터 모두 월드맵 실제 위치에 반영합니다.
+ * 여행 인카운터에서 경로 밖으로 이동하면 현재 Hex에서 기존 목적지 경로를 중단합니다.
+ */
+export function movePlayerByEncounter(
+  state: PlayerState,
+  targetHexId?: string,
+  locationName?: string,
+  movementType?: EncounterMovementType,
+  direction?: HexMoveDirection,
+): { nextState: PlayerState; success: boolean; message: string } {
+  if (!state.activeEncounterId) return { nextState: state, success: false, message: '진행 중인 인카운터가 없습니다.' };
+  if (state.activeBattle) return { nextState: state, success: false, message: '전투 중의 위치 변화는 전투 시스템이 담당합니다.' };
+  const interruptedTravel = Boolean(state.worldMap.travelSession?.active);
+  const currentTravelUnit = interruptedTravel
+    ? state.worldMap.travelSession?.encounters?.[state.worldMap.travelSession.currentEncounterIndex]
+    : undefined;
+  const current = WORLD_HEX_TILES[state.worldMap.currentHexId];
+  if (!current) return { nextState: state, success: false, message: '현재 월드맵 위치를 찾을 수 없습니다.' };
+
+  const resolvedTarget = resolveEncounterMovementTarget(state, targetHexId, direction);
+  if (!resolvedTarget) {
+    const attempted = targetHexId ? ` [${targetHexId}]` : direction ? ` ${direction} 방향` : '';
+    return { nextState: state, success: false, message: `현재 인카운터에서${attempted}으로 실제 이동할 수 없습니다. 월드맵 위치는 유지됩니다.` };
+  }
+  const target = WORLD_HEX_TILES[resolvedTarget.hexId];
+  if (!target) return { nextState: state, success: false, message: '유효하지 않은 월드맵 위치입니다.' };
+  const access = canEnterHex(state, target);
+  if (!access.ok) return { nextState: state, success: false, message: access.reason || '현재 해당 지역으로 이동할 수 없습니다.' };
+
+  // 여행 인카운터에서 경로를 이탈하는 경우, 이미 해당 Hex까지 이동한 시간 중 현재 사건 몫은
+  // 이 시점에 확정 소비한다. App 쪽에서는 이 행동의 일반 timeDelta를 0으로 유지해 중복 진행을 막는다.
+  const movementBaseState = interruptedTravel && currentTravelUnit
+    ? advanceGameTime(state, Math.max(1, Number(currentTravelUnit.minutes) || 1))
+    : state;
+
+  let nextState: PlayerState = {
+    ...movementBaseState,
+    worldMap: {
+      ...movementBaseState.worldMap,
+      currentHexId: target.id,
+      currentRegionId: target.regionId,
+      currentLayer: target.layer,
+      activeEncounterHexId: target.id,
+      lastSelectedHexId: target.id,
+      exploredHexIds: Array.from(new Set([...(movementBaseState.worldMap.exploredHexIds || []), target.id])),
+      discoveredHexIds: Array.from(new Set([...(movementBaseState.worldMap.discoveredHexIds || []), target.id])),
+      mapRevision: (movementBaseState.worldMap.mapRevision || 0) + 1,
+      // 인카운터 안에서 경로 밖의 실제 이동이 발생하면 기존 목적지 여행은 현재 Hex에서 중단한다.
+      travelSession: interruptedTravel ? null : movementBaseState.worldMap.travelSession,
+    },
+  };
+  nextState = revealAround(nextState, target.id, 1);
+  const displayName = locationName || target.locationName || target.featureName || target.sectorName || target.id;
+  const eventResult = dispatchGameEvent(nextState, 'LOCATION_ENTERED', {
+    location: displayName,
+    locationId: target.id,
+    locationName: displayName,
+  });
+  return {
+    nextState: eventResult.nextState,
+    success: true,
+    message: `📍 인카운터 진행에 따라 [${displayName}] Hex로 ${movementType === 'RUN' ? '달려' : movementType === 'ESCAPE' ? '도주해' : '이동해'} 진입했습니다.${interruptedTravel ? ' 기존 목적지 여행 경로는 현재 위치에서 중단되었습니다.' : ''}`,
+  };
+}
+
+/**
  * 인물과 조우하거나 대화하고 CHARACTER_MET / CHARACTER_TALKED 이벤트를 발생시킵니다.
  */
 export function interactWithCharacter(
@@ -3316,16 +4328,38 @@ export function interactWithCharacter(
   type: 'MET' | 'TALKED',
   characterName?: string
 ): { nextState: PlayerState; message: string } {
+  const char = state.majorCharacters?.[characterId];
+  if (!char || !char.isAlive) {
+    return { nextState: state, message: '현재 상호작용할 수 있는 주요 인물이 아닙니다.' };
+  }
+
+  // 직접 대화는 반드시 먼저 실제 조우한 인물이며, 현재 같은 Hex에 있어야 한다.
+  // MET 이벤트는 스토리/인카운터가 실제 조우를 성립시키는 진입점이므로 예외로 허용한다.
+  if (type === 'TALKED') {
+    const hasMet = Boolean(char.hasMet || (char.interactionHistory?.length || 0) > 0);
+    if (!hasMet) {
+      return { nextState: state, message: `${char.name}와(과) 아직 실제로 조우하지 않았습니다.` };
+    }
+    if (!char.currentHexId || char.currentHexId !== state.worldMap?.currentHexId) {
+      return { nextState: state, message: `${char.name}와(과) 현재 같은 장소에 있지 않아 대화할 수 없습니다.` };
+    }
+  }
+
   const eventType = type === 'MET' ? 'CHARACTER_MET' : 'CHARACTER_TALKED';
   const evRes = dispatchGameEvent(state, eventType, {
     characterId,
-    characterName,
+    characterName: characterName || char.name,
   });
 
   return {
     nextState: evRes.nextState,
-    message: `🗣️ ${characterName || characterId}와(과) ${type === 'MET' ? '조우' : '대화'}했습니다.`,
+    message: `🗣️ ${characterName || char.name}와(과) ${type === 'MET' ? '조우' : '대화'}했습니다.`,
   };
+}
+
+export function acknowledgeQuestAlerts(state: PlayerState): PlayerState {
+  if (!state.questAlertQuestIds?.length) return state;
+  return { ...state, questAlertQuestIds: [] };
 }
 
 /**
@@ -3362,6 +4396,7 @@ export function acceptQuest(
       [questId]: newProgress,
     },
     trackedQuestId: state.trackedQuestId || questId,
+    questAlertQuestIds: (state.questAlertQuestIds || []).filter((id) => id !== questId),
   };
 
   const systemMessages: string[] = [`🌟 [퀘스트 수락] ${def.title}: ${def.summary || def.description}`];
@@ -3567,12 +4602,16 @@ export function applyStateChanges(
   }
 
   let inventory = [...cleanState.inventory];
-  const maxPartyWeight = calculatePartyCarryWeight(cleanState);
+  let equippedBagId = cleanState.equippedBagId;
+  const actualItemsGained: Array<{ id?: string; name: string; quantity: number; quality?: 'POOR' | 'NORMAL' | 'FINE' | 'SUPERIOR' | 'MASTERWORK' }> = [];
+  const actualItemsLost: Array<{ id?: string; name: string; quantity: number }> = [];
 
   if (Array.isArray(safeChanges.addItems) && safeChanges.addItems.length > 0) {
     safeChanges.addItems.forEach((item) => {
       if (item && item.name && typeof item.quantity === 'number' && item.quantity > 0) {
-        const itemDef = getItemDefinition(item.name);
+        const itemDef = getItemDefinition(item.id || item.name);
+        const bagDef = getBagDefinition(item.bagId || item.id || item.name);
+        const inferredMeta = inferItemMetadata(item.id || item.name, item.description);
         const isQuestOrKey =
           itemDef?.category === 'QUEST' ||
           itemDef?.category === 'KEY' ||
@@ -3583,22 +4622,43 @@ export function applyStateChanges(
           item.name.includes('증표') ||
           item.name.includes('문장');
 
-        const currentWeight = calculateInventoryWeight(inventory, state.equippedBagId);
-        const encState = calculateEncumbranceState(currentWeight, maxPartyWeight);
+        const currentWeight = calculateInventoryWeight(inventory, equippedBagId);
+        const currentCarryWeight = calculatePartyCarryWeight({ ...cleanState, inventory, equippedBagId });
+        const encState = calculateEncumbranceState(currentWeight, currentCarryWeight);
+        const isImportantOrBag = isQuestOrKey || Boolean(bagDef);
 
-        if (encState.level === 'OVERLOADED' && !isQuestOrKey) {
+        if (encState.level === 'OVERLOADED' && !isImportantOrBag) {
           summaries.push(`⚠️ [심각한 과적 상태] 가방이 너무 무거워 [${item.name} x${item.quantity}]을(를) 더 이상 담지 못했습니다.`);
         } else {
-          inventory = addItem(inventory, {
-            id: item.id || itemDef?.id,
+          // 가방이 없는 상태에서 가방을 보상/인카운터로 획득하면 첫 1개는 즉시 장착한다.
+          // 장착된 가방은 인벤토리 수량에 중복으로 남기지 않는다.
+          const shouldAutoEquipBag = Boolean(bagDef) && !getBagDefinition(equippedBagId || '');
+          const quantityToInventory = Math.max(0, item.quantity - (shouldAutoEquipBag ? 1 : 0));
+          if (shouldAutoEquipBag && bagDef) {
+            equippedBagId = bagDef.id;
+            summaries.push(`🎒 자동 장착: ${bagDef.name}`);
+          }
+          if (quantityToInventory > 0) {
+            inventory = addItem(inventory, {
+              id: item.id || itemDef?.id || bagDef?.id,
+              name: item.name,
+              quantity: quantityToInventory,
+              description: item.description || itemDef?.description || bagDef?.description || inferredMeta.description,
+              flavorText: itemDef?.flavorText || bagDef?.flavorText,
+              illustrationUrl: itemDef?.illustrationUrl || bagDef?.illustrationUrl,
+              equipmentId: item.equipmentId || itemDef?.equipmentId,
+              bagId: item.bagId || bagDef?.id,
+              category: item.category || itemDef?.category || (bagDef ? 'EQUIPMENT' : inferredMeta.category),
+              quality: item.quality || 'NORMAL',
+            });
+          }
+          summaries.push(`획득: ${item.name} x${item.quantity}${isImportantOrBag && encState.level === 'OVERLOADED' ? ' (중요/가방 물품)' : ''}`);
+          actualItemsGained.push({
+            id: item.id || itemDef?.id || bagDef?.id,
             name: item.name,
             quantity: item.quantity,
-            description: item.description || itemDef?.description,
-            equipmentId: item.equipmentId || itemDef?.equipmentId,
-            category: item.category || itemDef?.category,
-            quality: item.quality,
+            quality: (['POOR','NORMAL','FINE','SUPERIOR','MASTERWORK'] as const).includes(item.quality as any) ? item.quality as 'POOR' | 'NORMAL' | 'FINE' | 'SUPERIOR' | 'MASTERWORK' : undefined,
           });
-          summaries.push(`획득: ${item.name} x${item.quantity}${isQuestOrKey && encState.level === 'OVERLOADED' ? ' (중요 물품)' : ''}`);
         }
       }
     });
@@ -3611,6 +4671,12 @@ export function applyStateChanges(
         inventory = removeResult.inventory;
         if (removeResult.removedQuantity > 0) {
           summaries.push(`소실: ${item.name} x${removeResult.removedQuantity}`);
+          const itemDef = getItemDefinition(item.name);
+          actualItemsLost.push({
+            id: itemDef?.id,
+            name: item.name,
+            quantity: removeResult.removedQuantity,
+          });
         }
       }
     });
@@ -3742,6 +4808,7 @@ if (adultEligible) {
     maxMana,
     rupees,
     inventory,
+    equippedBagId,
 
     adultStatus,
     corruptionStatus,
@@ -3768,6 +4835,22 @@ if (adultEligible) {
     nextState = applyCompanionNeedChanges(nextState, safeChanges.companionNeedChanges);
   }
 
+  // Gemini/이벤트가 반환한 동료 유대 변화도 실제 상태에 적용한다.
+  if (Array.isArray(safeChanges.companionBondChanges) && safeChanges.companionBondChanges.length > 0) {
+    for (const bondChange of safeChanges.companionBondChanges) {
+      if (!bondChange?.companionId) continue;
+      if (!(nextState.companions || []).some((c) => c.id === bondChange.companionId)) continue;
+      const bondResult = modifyCompanionBond(
+        nextState,
+        bondChange.companionId,
+        typeof bondChange.trustDelta === 'number' ? bondChange.trustDelta : 0,
+        typeof bondChange.bondExpGain === 'number' ? bondChange.bondExpGain : 0
+      );
+      nextState = bondResult.nextState;
+      summaries.push(bondResult.message);
+    }
+  }
+
   nextState =
     recalculateAdultDerivedStatus(nextState);
 
@@ -3777,41 +4860,29 @@ if (adultEligible) {
     nextState = advanceGameTime(nextState, validMinutes);
   }
 
-  // 아이템 획득 이벤트 순차 디스패치
-  if (Array.isArray(safeChanges.addItems) && safeChanges.addItems.length > 0) {
-    safeChanges.addItems.forEach((item) => {
-      if (item && item.name && typeof item.quantity === 'number' && item.quantity > 0) {
-        const itemDef = getItemDefinition(item.name);
-        const res = dispatchGameEvent(nextState, 'ITEM_GAINED', {
-          itemId: itemDef?.id,
-          itemName: item.name,
-          quantity: item.quantity,
-          quality: item.quality,
-        });
-        nextState = res.nextState;
-        if (res.messages.length > 0) {
-          summaries.push(...res.messages);
-        }
-      }
+  // 아이템 획득 이벤트는 '요청된 수량'이 아니라 실제 인벤토리/장착 상태에 반영된 수량만 디스패치한다.
+  for (const item of actualItemsGained) {
+    const itemDef = getItemDefinition(item.id || item.name);
+    const res = dispatchGameEvent(nextState, 'ITEM_GAINED', {
+      itemId: itemDef?.id || item.id,
+      itemName: item.name,
+      quantity: item.quantity,
+      quality: item.quality,
     });
+    nextState = res.nextState;
+    if (res.messages.length > 0) summaries.push(...res.messages);
   }
 
-  // 아이템 상실 이벤트 순차 디스패치
-  if (Array.isArray(safeChanges.removeItems) && safeChanges.removeItems.length > 0) {
-    safeChanges.removeItems.forEach((item) => {
-      if (item && item.name && typeof item.quantity === 'number' && item.quantity > 0) {
-        const itemDef = getItemDefinition(item.name);
-        const res = dispatchGameEvent(nextState, 'ITEM_LOST', {
-          itemId: itemDef?.id,
-          itemName: item.name,
-          quantity: item.quantity,
-        });
-        nextState = res.nextState;
-        if (res.messages.length > 0) {
-          summaries.push(...res.messages);
-        }
-      }
+  // 아이템 상실 이벤트 역시 실제 제거된 수량만 디스패치한다.
+  for (const item of actualItemsLost) {
+    const itemDef = getItemDefinition(item.id || item.name);
+    const res = dispatchGameEvent(nextState, 'ITEM_LOST', {
+      itemId: itemDef?.id || item.id,
+      itemName: item.name,
+      quantity: item.quantity,
     });
+    nextState = res.nextState;
+    if (res.messages.length > 0) summaries.push(...res.messages);
   }
 
   return { nextState, levelUpMessage, changeSummary: summaries };
@@ -3875,6 +4946,9 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
           race === 'BEASTKIN'
             ? p.profile?.beastkinType || beastkinType || 'CAT'
             : undefined,
+        // 체형 탭의 저장값이 종족 기본값보다 항상 우선한다. 종족은 값이 없을 때만 fallback이다.
+        height: Number(p.profile?.height ?? DEFAULT_CHARACTER_PROFILE.height),
+        build: p.profile?.build ?? DEFAULT_CHARACTER_PROFILE.build,
         breastSize: p.profile?.breastSize || 'SLENDER',
         hipSize: p.profile?.hipSize || 'AVERAGE',
         speechStyle: p.profile?.speechStyle || DEFAULT_CHARACTER_PROFILE.speechStyle,
@@ -3896,16 +4970,11 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
       const professions: ProfessionProgress[] = Array.isArray(p.professions) && p.professions.length > 0
         ? p.professions
         : createInitialProfessions();
-      const rawCampProgress = p.campProgress || { ...INITIAL_CAMP_PROGRESS };
-      const campProgress: CampProgress = {
-        ...INITIAL_CAMP_PROGRESS,
-        ...rawCampProgress,
-        storageItems: Array.isArray(rawCampProgress.storageItems) ? rawCampProgress.storageItems : [],
-      };
+      const campProgress = normalizeCampProgress(p.campProgress);
       const companions: CompanionData[] = (Array.isArray(p.companions) ? p.companions : []).map((c: any) => ({
         ...c,
         gender: '남성',
-        physicalAge: Math.max(18, Number(c.physicalAge ?? 20)),
+        physicalAge: normalizeAdultHumanoidPhysicalAge(c.physicalAge),
         needs: normalizeCompanionNeeds(c.needs || createInitialCompanionNeeds()),
         equippedBagId: c.equippedBagId !== undefined ? c.equippedBagId : null,
       }));
@@ -3916,12 +4985,13 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
       // 2.0.5: 기존 2.0 세이브에는 신규 45명의 customQuestIds: []가 저장되어 있다.
       // 사용자 진행 상태는 보존하면서, 이번 패치에서 공식 추가된 캐릭터 퀘스트 연결만 보강한다.
       for (const [characterId, defaultCharacter] of Object.entries(INITIAL_MAJOR_CHARACTERS)) {
-        const patchQuestIds = (defaultCharacter.customQuestIds || []).filter((id) => id.startsWith('quest_v205_'));
+        const patchQuestIds = (defaultCharacter.customQuestIds || []).filter((id) => id.startsWith('quest_v205_') || id.startsWith('quest_fate_'));
         if (patchQuestIds.length === 0) continue;
         const savedCharacter = majorCharacters[characterId];
         const savedQuestIds = Array.isArray(savedCharacter?.customQuestIds) ? savedCharacter.customQuestIds : [];
-        if (savedQuestIds.length === 0) {
-          majorCharacters[characterId] = { ...savedCharacter, customQuestIds: [...patchQuestIds] };
+        const mergedQuestIds = Array.from(new Set([...savedQuestIds, ...patchQuestIds]));
+        if (mergedQuestIds.length !== savedQuestIds.length) {
+          majorCharacters[characterId] = { ...savedCharacter, customQuestIds: mergedQuestIds };
         }
       }
       for (const [characterId, character] of Object.entries(majorCharacters as Record<string, any>)) {
@@ -3936,6 +5006,7 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
             ...Object.fromEntries(Object.keys(QUEST_DATABASE).filter((id)=>id.startsWith('guide_')&&id!=='guide_airship_flight'&&id!=='guide_recruitment').map((id)=>[id,{questId:id,status:'OFFERED' as const,currentStageId:1,objectives:{}}])),
           };
       const trackedQuestId = p.trackedQuestId || 'quest_main_awakening';
+      const questAlertQuestIds = Array.isArray(p.questAlertQuestIds) ? Array.from(new Set(p.questAlertQuestIds.filter((id: string) => Boolean(quests[id])))) : Object.values(quests).filter((q: any)=>q.status==='OFFERED').map((q: any)=>q.questId);
 
       // 인벤토리 아이템 메타데이터 보강
       const rawInventory = Array.isArray(p.inventory) ? p.inventory : [];
@@ -3945,6 +5016,10 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
           ...item,
           id: enriched.id,
           category: item.category || enriched.category,
+          description: item.description || enriched.description,
+          flavorText: item.flavorText || enriched.flavorText,
+          illustrationUrl: item.illustrationUrl || enriched.illustrationUrl,
+          bagId: item.bagId || getBagDefinition(item.id || item.name)?.id,
           quality: item.quality || 'NORMAL',
         };
       });
@@ -3957,7 +5032,7 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
       const dayCount = Math.max(1, Number(p.dayCount || 1));
 
       // 성인 상태 시스템 마이그레이션 (구 세이브 호환)
-      const adultEligible = Number(fullProfile.physicalAge ?? 0) >= 18;
+      const adultEligible = isAdultPhysicalAge(fullProfile.physicalAge);
 
       const migratedAdultStatus = adultEligible
         ? {
@@ -4058,9 +5133,10 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
         majorCharacters,
         quests,
         trackedQuestId,
+        questAlertQuestIds,
         skillProgression: ensureProgressionState({ ...p, profile: fullProfile, race, baseStats, stats: effectiveStats } as PlayerState).skillProgression,
         fate: normalizeFateState(p.fate, p.worldMap?.currentRegionId || 'GRANDIA', p.worldMap?.currentHexId || 'SURFACE:-12:0', dayCount, p.dialogueCount),
-        worldMap: p.worldMap ? { ...p.worldMap, discoveredWaystationIds: Array.isArray(p.worldMap.discoveredWaystationIds) ? p.worldMap.discoveredWaystationIds : [] } : createInitialWorldMapState('THE_PELLESS_LOWER', Array.isArray(p.storyFlags) ? p.storyFlags : raceDef.storyFlags),
+        worldMap: p.worldMap ? { ...p.worldMap, travelSession: p.worldMap.travelSession?.active ? { ...p.worldMap.travelSession, status: p.worldMap.travelSession.status === 'ENCOUNTER_PAUSED' ? 'ENCOUNTER_PAUSED' : 'MOVING', currentPathIndex: Math.max(0, Math.floor(Number(p.worldMap.travelSession.currentPathIndex ?? p.worldMap.travelSession.completedHexSteps ?? 0))), pausedAtHexId: p.worldMap.travelSession.status === 'ENCOUNTER_PAUSED' ? (p.worldMap.travelSession.pausedAtHexId || p.worldMap.activeEncounterHexId || p.worldMap.currentHexId) : undefined } : null, activeEncounterHexId: p.activeEncounterId ? (p.worldMap.activeEncounterHexId || p.worldMap.currentHexId) : null, discoveredWaystationIds: Array.isArray(p.worldMap.discoveredWaystationIds) ? p.worldMap.discoveredWaystationIds : [], hostileSiteStates: p.worldMap.hostileSiteStates && typeof p.worldMap.hostileSiteStates === 'object' ? p.worldMap.hostileSiteStates : {} } : createInitialWorldMapState('THE_PELLESS_LOWER', Array.isArray(p.storyFlags) ? p.storyFlags : raceDef.storyFlags),
         dungeonExploration: p.dungeonExploration || null,
         dungeonRecords: p.dungeonRecords && typeof p.dungeonRecords === 'object' ? p.dungeonRecords : {},
         declinedQuestIds: Array.isArray(p.declinedQuestIds) ? p.declinedQuestIds : [],
@@ -4070,8 +5146,34 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
         restraints: Array.isArray(p.restraints) ? p.restraints : [],
         adultNarrativeQueue: migratedAdultNarrativeQueue,
         companionNeedQueue: Array.isArray(p.companionNeedQueue) ? p.companionNeedQueue : [],
-        bodyPayloads: Array.isArray(p.bodyPayloads) ? p.bodyPayloads : [],
-        parasiteStates: Array.isArray(p.parasiteStates) ? p.parasiteStates : [],
+        bodyPayloads: normalizeSavedBodyPayloads(p.bodyPayloads),
+        eggCohorts: Array.isArray(p.eggCohorts) ? p.eggCohorts.flatMap((cohort: any) => {
+          if (!cohort || !['INSECTOID_EGG','TENTACLE_EGG'].includes(String(cohort.eggType || ''))) return [];
+          if (!['COMPARTMENT_1','COMPARTMENT_2'].includes(String(cohort.compartmentId || ''))) return [];
+          return [{
+            ...cohort,
+            count: Math.max(1, Math.floor(Number(cohort.count) || 1)),
+            occupiedAmount: Math.max(0, Number(cohort.occupiedAmount) || 0),
+            elapsedActiveMinutes: Math.max(0, Number(cohort.elapsedActiveMinutes) || 0),
+            incubationMinutes: Math.max(1, Number(cohort.incubationMinutes) || EGG_SYSTEM_CONFIG.incubationMinutes[cohort.eggType as EggType]),
+            stage: ['DORMANT','ACTIVE','DEVELOPING','HATCH_READY'].includes(String(cohort.stage || '')) ? cohort.stage : 'DORMANT',
+            plannedGrowthMode: cohort.plannedGrowthMode === 'INSERTED' ? 'INSERTED' : 'INTERNAL',
+          } as EggCohort];
+        }) : [],
+        parasiteStates: Array.isArray(p.parasiteStates) ? p.parasiteStates.map((parasite: any) => ({
+          ...parasite,
+          originRoute: parasite.originRoute || (parasite.originCompartmentId === 'COMPARTMENT_2' ? 'ANAL' : parasite.originCompartmentId === 'COMPARTMENT_1' ? 'VAGINAL' : undefined),
+          maturationMinutes: Math.max(1, Number(parasite.maturationMinutes ?? parasite.incubationMinutes ?? PARASITE_GROWTH_CONFIG.maturationMinutes)),
+          stage: parasite.stage === 'MATURE' ? 'MATURE' : parasite.stage === 'RESOLVING' ? 'RESOLVING' : parasite.stage === 'DEVELOPING' ? 'JUVENILE' : parasite.stage === 'JUVENILE' ? 'JUVENILE' : 'HATCHLING',
+          compartmentId: undefined,
+          incubationMinutes: undefined,
+        })) : [],
+        pheromoneState: p.pheromoneState && typeof p.pheromoneState === 'object' ? {
+          ...createEmptyPheromoneState(),
+          INSECTOID: { ...createEmptyPheromoneState().INSECTOID, ...(p.pheromoneState.INSECTOID || {}) },
+          TENTACLE: { ...createEmptyPheromoneState().TENTACLE, ...(p.pheromoneState.TENTACLE || {}) },
+        } : createEmptyPheromoneState(),
+        defeatAdultEvent: p.defeatAdultEvent?.active ? p.defeatAdultEvent : null,
         bladderStatus: p.bladderStatus && typeof p.bladderStatus === 'object' ? {
           amount: clamp(Number(p.bladderStatus.amount ?? 0), 0, Number(p.bladderStatus.capacity ?? BLADDER_CONFIG.capacity)),
           capacity: Math.max(1, Number(p.bladderStatus.capacity ?? BLADDER_CONFIG.capacity)),
@@ -4080,6 +5182,8 @@ export function loadGameData(): { playerState: PlayerState; messages: GameMessag
         } : { amount: 0, capacity: BLADDER_CONFIG.capacity, urge: 0, productionPerMinute: BLADDER_CONFIG.productionPerMinute },
         pregnancy: p.pregnancy?.active ? p.pregnancy : undefined,
         dialogueCount: Math.max(0, Number(p.dialogueCount ?? 0)),
+        activePotionEffects: Array.isArray(p.activePotionEffects) ? p.activePotionEffects.filter((effect: any) => effect && effect.statusEffectId && Number(effect.remainingMinutes) > 0).map((effect: any) => ({ statusEffectId: String(effect.statusEffectId), sourceItemId: String(effect.sourceItemId || ''), name: String(effect.name || effect.statusEffectId), remainingMinutes: Math.max(1, Math.floor(Number(effect.remainingMinutes) || 0)) })) : [],
+        explorationConditions: Array.isArray(p.explorationConditions) ? Array.from(new Set(p.explorationConditions.filter(Boolean).map(String))) : [],
         inventory,
       };
 

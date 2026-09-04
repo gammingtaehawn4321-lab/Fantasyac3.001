@@ -5,6 +5,7 @@ import { calculateCraftingQualityScore, getQualityFromScore, QUALITY_TIERS, Mate
 import { RECIPE_DATABASE } from '../data/professions/professionData';
 import { passTime, addItem } from '../gameEngine';
 import { addTechnologyExp } from '../data/technology/technologyUtils';
+import { dispatchGameEvent } from '../gameEvents';
 import { Hammer, Flame, Shield, Wrench, Anvil, Sparkles, AlertCircle } from 'lucide-react';
 
 interface BlacksmithWorkshopModalProps {
@@ -76,6 +77,15 @@ export const BlacksmithWorkshopModal: React.FC<BlacksmithWorkshopModalProps> = (
 
     onUpdateState((prev) => {
       let nextState = result.nextState;
+      for (const crafted of result.craftedIngots) {
+        nextState = dispatchGameEvent(nextState, 'ITEM_CRAFTED', {
+          itemId: crafted.id,
+          itemName: crafted.name,
+          quantity: crafted.quantity,
+          quality: crafted.quality === 'CRUDE' ? 'POOR' : crafted.quality === 'GOOD' ? 'FINE' : crafted.quality === 'EXCELLENT' ? 'SUPERIOR' : crafted.quality,
+          professionId: 'BLACKSMITH',
+        }).nextState;
+      }
       nextState = passTime(nextState, result.minutesSpent);
       return nextState;
     });
@@ -134,14 +144,23 @@ export const BlacksmithWorkshopModal: React.FC<BlacksmithWorkshopModalProps> = (
       // 출력 완성품 추가
       const outDef = currentOtherRecipe.output;
       nextState.inventory = updatedInv;
-      nextState = addItem(nextState, {
+      const outputQuantity = outDef.baseQuantity || 1;
+      nextState.inventory = addItem(nextState.inventory, {
         id: outDef.equipmentId || outDef.itemName,
         name: outDef.itemName,
-        quantity: outDef.baseQuantity || 1,
+        quantity: outputQuantity,
         category: currentOtherRecipe.category === 'CAMP_UPGRADE' ? 'MATERIAL' : (currentOtherRecipe.category || 'EQUIPMENT'),
         description: `${outDef.itemName} (대장 단조 완성품)`,
+        equipmentId: outDef.equipmentId,
         quality: qInfo.quality,
       });
+      nextState = dispatchGameEvent(nextState, 'ITEM_CRAFTED', {
+        itemId: outDef.equipmentId || outDef.itemName,
+        itemName: outDef.itemName,
+        quantity: outputQuantity,
+        quality: qInfo.quality === 'CRUDE' ? 'POOR' : qInfo.quality === 'GOOD' ? 'FINE' : qInfo.quality === 'EXCELLENT' ? 'SUPERIOR' : qInfo.quality,
+        professionId: 'BLACKSMITH',
+      }).nextState;
 
       // 경험치 & 시간 경과
       const expGain = currentOtherRecipe.expReward || 40;

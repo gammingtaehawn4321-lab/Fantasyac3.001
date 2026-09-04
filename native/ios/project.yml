@@ -1,0 +1,36 @@
+name: Fantasyac
+options:
+  bundleIdPrefix: com.fantasyac
+targets:
+  Fantasyac:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.4"
+    sources:
+      - path: Fantasyac
+      - path: www
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fantasyac.game
+        PRODUCT_NAME: 판타지악
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        IPHONEOS_DEPLOYMENT_TARGET: "16.4"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_CXX_LIBRARY: libc++
+        MARKETING_VERSION: 4.0.5
+        CURRENT_PROJECT_VERSION: 4000500
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Fantasyac/Fantasyac-Bridging-Header.h
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: 판타지악
+    dependencies:
+      - framework: Frameworks/llama.xcframework
+        embed: true
+        codeSign: true

@@ -1,5 +1,6 @@
 import { MajorCharacter } from '../../types';
 import { EXPANDED_MAJOR_CHARACTERS } from './majorCharacterExpansion';
+import { FATE_QUEST_IDS_BY_CHARACTER } from '../quests/fateQuestDatabase';
 
 const LEGACY_MAJOR_CHARACTERS: Record<string, MajorCharacter> = {
   elena_swordmaster: {
@@ -208,7 +209,15 @@ const LEGACY_MAJOR_CHARACTERS: Record<string, MajorCharacter> = {
   },
 };
 
-export const INITIAL_MAJOR_CHARACTERS: Record<string, MajorCharacter> = { ...LEGACY_MAJOR_CHARACTERS, ...EXPANDED_MAJOR_CHARACTERS };
+const BASE_MAJOR_CHARACTERS: Record<string, MajorCharacter> = { ...LEGACY_MAJOR_CHARACTERS, ...EXPANDED_MAJOR_CHARACTERS };
+
+/** 운명 퀘스트는 주요 인물 정의를 덮어쓰지 않고 customQuestIds에만 합성한다. */
+export const INITIAL_MAJOR_CHARACTERS: Record<string, MajorCharacter> = Object.fromEntries(
+  Object.entries(BASE_MAJOR_CHARACTERS).map(([id, character]) => [id, {
+    ...character,
+    customQuestIds: Array.from(new Set([...(character.customQuestIds || []), ...(FATE_QUEST_IDS_BY_CHARACTER[id] || [])])),
+  }])
+) as Record<string, MajorCharacter>;
 
 export function getMajorCharacter(charId?: string): MajorCharacter | undefined {
   if (!charId) return undefined;

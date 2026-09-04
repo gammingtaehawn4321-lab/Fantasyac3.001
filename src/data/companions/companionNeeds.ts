@@ -1,4 +1,5 @@
 import type { CompanionData, CompanionNeedCue, CompanionNeedsState, PlayerState } from '../../types';
+import { isAdultPhysicalAge } from '../../config/agePolicy';
 import { BLADDER_CONFIG } from '../bodySystemConfig';
 
 export const COMPANION_NEED_THRESHOLDS = [30, 50, 70, 100] as const;
@@ -187,11 +188,12 @@ function applyNeedsMutation(
 
 export function applyCompanionStoryNeedProgress(state: PlayerState): PlayerState {
   // 플레이어가 성인 상태가 아닐 경우 플레이어를 향한 성욕 이벤트는 생성하지 않는다.
-  const playerAdult = Number(state.profile?.physicalAge ?? 0) >= 18;
+  const playerAdult = isAdultPhysicalAge(state.profile?.physicalAge);
   if (!playerAdult || !(state.companions || []).length) return state;
 
   const queue = [...(state.companionNeedQueue || [])];
   const companions = state.companions.map((companion) => {
+    if (companion.kind === 'PET') return companion;
     const gainMultiplier = calculateCompanionNeedGainMultiplier(companion);
     const desireGain = COMPANION_DESIRE_GAIN_PER_STORY_LOG * gainMultiplier;
     const result = applyNeedsMutation(state, companion, (needs) => ({
@@ -211,6 +213,7 @@ export function applyCompanionNeedTimeProgress(state: PlayerState, elapsedMinute
 
   const queue = [...(state.companionNeedQueue || [])];
   const companions = state.companions.map((companion) => {
+    if (companion.kind === 'PET') return companion;
     const gainMultiplier = calculateCompanionNeedGainMultiplier(companion);
     const urinationGain = minutes * COMPANION_URINATION_GAIN_PER_MINUTE * gainMultiplier;
     const result = applyNeedsMutation(state, companion, (needs) => ({
@@ -234,7 +237,7 @@ export function applyCompanionNeedChanges(
     if (!change?.companionId) continue;
     const queue = [...(next.companionNeedQueue || [])];
     const companions = next.companions.map((companion) => {
-      if (companion.id !== change.companionId) return companion;
+      if (companion.id !== change.companionId || companion.kind === 'PET') return companion;
       const result = applyNeedsMutation(next, companion, (needs) => ({
         ...needs,
         desire: roundNeedValue(needs.desire + (Number(change.desireDelta) || 0)),

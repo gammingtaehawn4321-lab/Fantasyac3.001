@@ -5,6 +5,7 @@ import { PotionDefinition } from '../data/potions/potionTypes';
 import { calculateCraftingQualityScore, getQualityFromScore, MaterialQuality } from '../data/technology/craftingQuality';
 import { addTechnologyExp } from '../data/technology/technologyUtils';
 import { passTime, addItem, removeItem } from '../gameEngine';
+import { dispatchGameEvent } from '../gameEvents';
 import { FlaskConical, Sparkles, Check, AlertCircle } from 'lucide-react';
 
 interface AlchemyCraftingModalProps {
@@ -120,14 +121,23 @@ export const AlchemyCraftingModal: React.FC<AlchemyCraftingModalProps> = ({
       onUpdateState((prev) => {
         let nextState = { ...prev };
         currentSelectedRefining.ingredients.forEach((ing) => {
-          nextState = removeItem(nextState, ing.itemName, ing.quantity * count);
+          nextState.inventory = removeItem(nextState.inventory, ing.itemName, ing.quantity * count).inventory;
         });
 
-        nextState = addItem(nextState, {
+        const refinedQuantity = currentSelectedRefining.outputQuantity * count;
+        nextState.inventory = addItem(nextState.inventory, {
+          id: currentSelectedRefining.outputItemName === '맑은 이슬' ? 'clear_dew' : currentSelectedRefining.outputItemName === '빛나는 마나석 파편' ? 'mana_crystal_shard' : undefined,
           name: currentSelectedRefining.outputItemName,
-          quantity: currentSelectedRefining.outputQuantity * count,
+          quantity: refinedQuantity,
           description: `${currentSelectedRefining.outputItemName} 정제재`,
+          category: 'MATERIAL',
         });
+        nextState = dispatchGameEvent(nextState, 'ITEM_CRAFTED', {
+          itemId: currentSelectedRefining.outputItemName === '맑은 이슬' ? 'clear_dew' : currentSelectedRefining.outputItemName === '빛나는 마나석 파편' ? 'mana_crystal_shard' : currentSelectedRefining.outputItemName,
+          itemName: currentSelectedRefining.outputItemName,
+          quantity: refinedQuantity,
+          professionId: 'ALCHEMIST',
+        }).nextState;
 
         const expGain = 15 * count;
         nextState.technologyState = addTechnologyExp(nextState.technologyState || {}, 'ALCHEMY', expGain);
@@ -149,7 +159,7 @@ export const AlchemyCraftingModal: React.FC<AlchemyCraftingModalProps> = ({
     onUpdateState((prev) => {
       let nextState = { ...prev };
       currentSelectedPotion.ingredients.forEach((ing) => {
-        nextState = removeItem(nextState, ing.itemName, ing.quantity * count);
+        nextState.inventory = removeItem(nextState.inventory, ing.itemName, ing.quantity * count).inventory;
       });
 
       const qScore = calculateCraftingQualityScore({
@@ -159,7 +169,7 @@ export const AlchemyCraftingModal: React.FC<AlchemyCraftingModalProps> = ({
       });
       const qInfo = getQualityFromScore(qScore);
 
-      nextState = addItem(nextState, {
+      nextState.inventory = addItem(nextState.inventory, {
         id: currentSelectedPotion.id,
         name: currentSelectedPotion.name,
         quantity: count,
@@ -167,6 +177,13 @@ export const AlchemyCraftingModal: React.FC<AlchemyCraftingModalProps> = ({
         description: currentSelectedPotion.description,
         quality: qInfo.quality,
       });
+      nextState = dispatchGameEvent(nextState, 'ITEM_CRAFTED', {
+        itemId: currentSelectedPotion.id,
+        itemName: currentSelectedPotion.name,
+        quantity: count,
+        quality: qInfo.quality === 'CRUDE' ? 'POOR' : qInfo.quality === 'GOOD' ? 'FINE' : qInfo.quality === 'EXCELLENT' ? 'SUPERIOR' : qInfo.quality,
+        professionId: 'ALCHEMIST',
+      }).nextState;
 
       const expGain = (currentSelectedPotion.requiredAlchemyLevel * 8 + 25) * count;
       nextState.technologyState = addTechnologyExp(nextState.technologyState || {}, 'ALCHEMY', expGain);

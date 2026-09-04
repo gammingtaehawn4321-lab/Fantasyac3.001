@@ -229,7 +229,7 @@ export const RACE_DEFINITIONS: Record<string, RaceDefinition> = {
     subName: '여우 수인',
     summary: '민첩 +2 · 지능 +2 · 행운 +2 · 근력 -1 · 기만 및 환술',
     description:
-      '수인은 모두 여성으로 태어납니다. 날렵한 몸놀림과 비상한 지혜를 지닌 여우 수인입니다. 교섭과 속임수, 환각 술식에 능하며 돌발 상황을 재치 있게 모면합니다.',
+      '날렵한 몸놀림과 비상한 지혜를 지닌 여우 수인입니다. 교섭과 속임수, 환각 술식에 능하며 돌발 상황을 재치 있게 모면합니다.',
     iconSymbol: '🦊',
     statModifiers: {
       strength: -1,
@@ -258,7 +258,7 @@ export const RACE_DEFINITIONS: Record<string, RaceDefinition> = {
     subName: '고양이 수인',
     summary: '민첩 +4 · 행운 +2 · 체력 -1 · 야간 시야 및 착지 회피',
     description:
-      '수인은 모두 여성으로 태어납니다. 극도의 민첩성과 유연성을 자랑하는 고양이 수인입니다. 어둠 속에서도 사물을 똑똑히 보며, 은신과 기습, 지형지물 활용에 탁월합니다.',
+      '극도의 민첩성과 유연성을 자랑하는 고양이 수인입니다. 어둠 속에서도 사물을 똑똑히 보며, 은신과 기습, 지형지물 활용에 탁월합니다.',
     iconSymbol: '🐱',
     statModifiers: {
       strength: 0,
@@ -287,7 +287,7 @@ export const RACE_DEFINITIONS: Record<string, RaceDefinition> = {
     subName: '개 수인',
     summary: '체력 +3 · 근력 +1 · 민첩 +1 · 정신 +1 · 후각 추적 및 동료 신뢰',
     description:
-      '수인은 모두 여성으로 태어납니다. 강인한 끈기와 예민한 후각을 지닌 개 수인입니다. 흔적을 놓치지 않는 추적 능력을 발휘하며, 동료 및 NPC들과의 깊은 유대감을 형성합니다.',
+      '강인한 끈기와 예민한 후각을 지닌 개 수인입니다. 흔적을 놓치지 않는 추적 능력을 발휘하며, 동료 및 NPC들과의 깊은 유대감을 형성합니다.',
     iconSymbol: '🐕',
     statModifiers: {
       strength: 1,
@@ -316,7 +316,7 @@ export const RACE_DEFINITIONS: Record<string, RaceDefinition> = {
     subName: '늑대 수인',
     summary: '근력 +3 · 체력 +2 · 민첩 +1 · 정신 +1 · 지능 -1 · 포식자 본능',
     description:
-      '수인은 모두 여성으로 태어납니다. 거친 야성과 강력한 완력을 겸비한 늑대 수인입니다. 무리를 이끄는 위압감과 빈틈없는 사냥 본능으로 전장을 지배합니다.',
+      '거친 야성과 강력한 완력을 겸비한 늑대 수인입니다. 무리를 이끄는 위압감과 빈틈없는 사냥 본능으로 전장을 지배합니다.',
     iconSymbol: '🐺',
     statModifiers: {
       strength: 3,
@@ -345,7 +345,7 @@ export const RACE_DEFINITIONS: Record<string, RaceDefinition> = {
     subName: '새 수인',
     summary: '민첩 +3 · 행운 +2 · 지능 +1 · 정신 +1 · 근력 -1 · 원거리 시야 및 정찰',
     description:
-      '수인은 모두 여성으로 태어납니다. 탁 트인 시야와 예리한 관찰력을 지닌 새 수인입니다. 지형을 분석하고 원거리의 위험을 미리 감지하여 언제나 한발 앞서 대처합니다.',
+      '탁 트인 시야와 예리한 관찰력을 지닌 새 수인입니다. 지형을 분석하고 원거리의 위험을 미리 감지하여 언제나 한발 앞서 대처합니다.',
     iconSymbol: '🦅',
     statModifiers: {
       strength: -1,

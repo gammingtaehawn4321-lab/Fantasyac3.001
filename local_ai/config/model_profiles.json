@@ -1,0 +1,50 @@
+{
+  "desktop-quality": {
+    "label": "PC 고품질",
+    "hfModel": "Qwen/Qwen3-14B-GGUF:Q4_K_M",
+    "ctxSize": 16384,
+    "maxTokens": 2600,
+    "temperature": 0.72,
+    "topP": 0.92,
+    "repeatPenalty": 1.08
+  },
+  "desktop-balanced": {
+    "label": "PC 균형",
+    "hfModel": "Qwen/Qwen3-8B-GGUF:Q4_K_M",
+    "ctxSize": 8192,
+    "maxTokens": 2200,
+    "temperature": 0.7,
+    "topP": 0.92,
+    "repeatPenalty": 1.08
+  },
+  "galaxy-a17-safe": {
+    "label": "Galaxy A17 안전",
+    "hfModel": "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M",
+    "ctxSize": 3072,
+    "maxTokens": 900,
+    "temperature": 0.66,
+    "topP": 0.9,
+    "repeatPenalty": 1.1,
+    "note": "SM-A175N 6GB RAM 기준. Android 네이티브 런타임 연결 전용 프로필."
+  },
+  "ipad-safe": {
+    "label": "iPad 안전",
+    "hfModel": "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M",
+    "ctxSize": 3072,
+    "maxTokens": 900,
+    "temperature": 0.66,
+    "topP": 0.9,
+    "repeatPenalty": 1.1,
+    "note": "A14급 iPad까지 고려한 안전 프로필. llama.cpp XCFramework + Metal 경로."
+  },
+  "ipad-quality": {
+    "label": "iPad 고품질 (고성능 기기)",
+    "hfModel": "Qwen/Qwen3-4B-GGUF:Q4_K_M",
+    "ctxSize": 4096,
+    "maxTokens": 1300,
+    "temperature": 0.68,
+    "topP": 0.91,
+    "repeatPenalty": 1.09,
+    "note": "메모리 여유가 있는 M계열/A17 Pro급 iPad에서 선택적으로 사용."
+  }
+}

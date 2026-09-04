@@ -52,6 +52,7 @@ const R: Row[] = [
   ['pearl','진주',0.1,1,'RARE',['SEIRE'],['UNDERWATER','DEEP_SEA'],['VALUABLE','EQUIPMENT_CRAFT'],'귀중품·장신구'],
   ['abyss_pearl','심연진주',0.1,1,'EPIC',['SEIRE'],['DEEP_SEA'],['VALUABLE','ALCHEMY','EQUIPMENT_CRAFT'],'희귀 심해 보석'],
 
+  ['wild_herb','약초',0.1,1,'COMMON',['GRANDIA','FOREZIN'],['FOREST','PLAINS'],['ALCHEMY','QUEST'],'초반 생존 퀘스트와 기본 회복에 쓰는 야생 약초'],
   ['red_berry','붉은 열매',0.1,1,'COMMON',['GRANDIA','FOREZIN'],['FOREST','PLAINS'],['COOKING','ALCHEMY'],'식량·약'],
   ['blue_berry','푸른 열매',0.1,1,'COMMON',['FOREZIN','PROSTI'],['FOREST','SNOW'],['COOKING','ALCHEMY'],'식량·약'],
   ['forest_mushroom','숲버섯',0.2,1,'COMMON',['FOREZIN'],['FOREST'],['COOKING','ALCHEMY'],'조리·연금'],

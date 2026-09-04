@@ -53,7 +53,8 @@ export function refuelAirship(state:PlayerState,itemId:'aether_fuel_cell'|'storm
   const actual=Math.min(use,Math.ceil(room/per));
   const inv=remove(state.inventory,itemId,actual);
   const gain=Math.min(room,actual*per);
-  return{ok:true,state:{...state,inventory:inv,airship:{...a,fuel:a.fuel+gain}},message:`연료 +${gain} (${a.fuel+gain}/${a.maxFuel})`};
+  const def=getItemDefinition(itemId);
+  return{ok:true,state:{...state,inventory:inv,airship:{...a,fuel:a.fuel+gain}},message:`연료 +${gain} (${a.fuel+gain}/${a.maxFuel})`,consumedCount:actual,itemName:def?.name||itemId};
 }
 
 

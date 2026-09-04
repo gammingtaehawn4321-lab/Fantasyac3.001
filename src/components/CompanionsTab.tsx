@@ -1,12 +1,21 @@
 import React, { useState } from 'react';
-import { CompanionData, CompanionTactic, PlayerState, getKoreanLabel } from '../types';
+import { CompanionData, CompanionTactic, PetCareAction, PlayerState, getKoreanLabel } from '../types';
 import { Users, Heart, Swords, ShieldCheck, ShieldAlert, Sparkles } from 'lucide-react';
 import { CAMP_FACILITIES_DATABASE } from '../data/camp/campData';
+import { getPetCommandRates, getPetFoodOptions, PET_CARE_LABELS } from '../data/pets/petProgression';
+import { getPetSpeciesDefinition } from '../data/pets/petDatabase';
+import { PET_GRADE_LABELS } from '../data/pets/petGrowth';
 
 interface CompanionsTabProps {
   playerState: PlayerState;
   onSetCompanionTactic: (companionId: string, tactic: CompanionTactic) => void;
   onToggleActiveParty: (companionId: string) => void;
+  onRespondPetRequest: (petId: string, response: 'ACCEPT' | 'REFUSE') => void;
+  onPetCare: (petId: string, action: PetCareAction) => void;
+  onFeedPet: (petId: string, itemId: string) => void;
+  onUpgradePetMetabolism: (petId: string) => void;
+  petInteractionLoading?: boolean;
+  onSetEquippedPet: (petId: string | null) => void;
 }
 
 const TACTIC_LABELS: Record<CompanionTactic, { name: string; desc: string; icon: string }> = {
@@ -31,14 +40,28 @@ export const CompanionsTab: React.FC<CompanionsTabProps> = ({
   playerState,
   onSetCompanionTactic,
   onToggleActiveParty,
+  onRespondPetRequest,
+  onPetCare,
+  onFeedPet,
+  onUpgradePetMetabolism,
+  petInteractionLoading = false,
+  onSetEquippedPet,
 }) => {
+  const [activeKind, setActiveKind] = useState<'HUMANOID' | 'PET'>('HUMANOID');
   const [selectedCompanionId, setSelectedCompanionId] = useState<string>(
-    playerState.companions[0]?.id || ''
+    playerState.companions.find((c) => (c.kind || 'HUMANOID') === 'HUMANOID')?.id || playerState.companions[0]?.id || ''
   );
 
-  const selectedCompanion: CompanionData | undefined = playerState.companions.find(
-    (c) => c.id === selectedCompanionId
-  );
+  const filteredCompanions = playerState.companions.filter((c) => (c.kind || 'HUMANOID') === activeKind);
+  const selectedCompanion: CompanionData | undefined =
+    filteredCompanions.find((c) => c.id === selectedCompanionId) || filteredCompanions[0];
+  const selectedPetIsEquipped = Boolean(selectedCompanion?.kind === 'PET' && selectedCompanion.id === playerState.equippedPetId);
+
+  const selectKind = (kind: 'HUMANOID' | 'PET') => {
+    setActiveKind(kind);
+    const first = playerState.companions.find((c) => (c.kind || 'HUMANOID') === kind);
+    setSelectedCompanionId(first?.id || '');
+  };
 
   const activePartyCount = playerState.companions.filter((c) => c.isActivePartyMember).length;
   const activePartyFull = activePartyCount >= 4;
@@ -63,12 +86,22 @@ export const CompanionsTab: React.FC<CompanionsTabProps> = ({
       <div className="w-full md:w-72 bg-zinc-900/90 border border-zinc-800 rounded-xl p-3 shadow-xl space-y-3">
         <div className="flex items-center justify-between px-2 py-1">
           <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
-            <Users className="w-4 h-4 text-amber-400" /> 동행자 목록
+            <Users className="w-4 h-4 text-amber-400" /> 동반자
           </span>
-          <span className="text-xs text-zinc-500 font-normal">{playerState.companions.length}명</span>
+          <span className="text-xs text-zinc-500 font-normal">{filteredCompanions.length}명</span>
+        </div>
+        <div className="grid grid-cols-2 gap-1 p-1 bg-zinc-950/70 rounded-lg border border-zinc-800">
+          <button onClick={() => selectKind('HUMANOID')} className={`px-2 py-1.5 rounded text-xs font-bold ${activeKind === 'HUMANOID' ? 'bg-amber-700/40 text-amber-200' : 'text-zinc-500 hover:text-zinc-300'}`}>동료</button>
+          <button onClick={() => selectKind('PET')} className={`px-2 py-1.5 rounded text-xs font-bold ${activeKind === 'PET' ? 'bg-emerald-800/50 text-emerald-200' : 'text-zinc-500 hover:text-zinc-300'}`}>펫</button>
         </div>
 
-        {playerState.companions.map((comp) => {
+        {filteredCompanions.length === 0 && (
+          <div className="p-4 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-lg">
+            {activeKind === 'PET' ? '영입한 펫이 없습니다.' : '영입한 동료가 없습니다.'}
+          </div>
+        )}
+
+        {filteredCompanions.map((comp) => {
           const isSelected = selectedCompanionId === comp.id;
 
           return (
@@ -90,7 +123,7 @@ export const CompanionsTab: React.FC<CompanionsTabProps> = ({
                   <div>
                     <div className="font-bold text-sm text-zinc-100">{comp.name}</div>
                     <div className="text-[11px] text-zinc-400">
-                      레벨 {comp.level} {getKoreanLabel(comp.combatClass || 'NONE', '모험가')}
+                      레벨 {comp.level} {comp.kind === 'PET' ? '펫' : getKoreanLabel(comp.combatClass || 'NONE', '모험가')}
                     </div>
                   </div>
                 </div>
@@ -111,7 +144,7 @@ export const CompanionsTab: React.FC<CompanionsTabProps> = ({
                 <div className="flex justify-between text-zinc-400">
                   <span>체력 {comp.hp}/{comp.maxHp}</span>
                   <span className="text-rose-400 flex items-center gap-0.5">
-                    <Heart className="w-3 h-3 fill-rose-500/40 text-rose-500" /> 신뢰도 {comp.bond.trust}%
+                    <Heart className="w-3 h-3 fill-rose-500/40 text-rose-500" /> {comp.kind === 'PET' ? `친밀도 ${Math.round(comp.petState?.relationship.familiarity || 0)}%` : `신뢰도 ${comp.bond.trust}%`}
                   </span>
                 </div>
                 <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
@@ -135,10 +168,12 @@ export const CompanionsTab: React.FC<CompanionsTabProps> = ({
               <div className="flex items-center gap-2.5">
                 <h3 className="text-lg font-bold text-zinc-100">{selectedCompanion.name}</h3>
                 <span className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-semibold">
-                  레벨 {selectedCompanion.level} • {getKoreanLabel(selectedCompanion.race, selectedCompanion.race)} • {selectedCompanion.gender}
+                  {selectedCompanion.kind === 'PET' && selectedCompanion.petState
+                    ? `레벨 ${selectedCompanion.level} • ${getPetSpeciesDefinition(selectedCompanion.petState.speciesId).displayName} • ${selectedCompanion.petState.category === 'INSECT' ? '곤충형' : '동물형'}`
+                    : `레벨 ${selectedCompanion.level} • ${getKoreanLabel(selectedCompanion.race, selectedCompanion.race)} • ${selectedCompanion.gender}`}
                 </span>
                 <span className="text-xs px-2 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-800/40 font-bold">
-                  {getKoreanLabel(selectedCompanion.combatClass || 'NONE', '무직')}
+                  {selectedCompanion.kind === 'PET' ? '펫' : getKoreanLabel(selectedCompanion.combatClass || 'NONE', '무직')}
                 </span>
               </div>
               <p className="text-xs text-zinc-400 mt-1 leading-relaxed">{selectedCompanion.appearance}</p>
@@ -180,7 +215,11 @@ export const CompanionsTab: React.FC<CompanionsTabProps> = ({
               <Heart className="w-4 h-4 text-rose-400 fill-rose-500/20" />
               <div>
                 <span className="font-bold text-zinc-200">유대 등급 {selectedCompanion.bond.bondLevel}</span>
-                <span className="text-zinc-400 ml-2">(신뢰도: {selectedCompanion.bond.trust} / 100)</span>
+                {selectedCompanion.kind === 'PET' ? (
+                  <span className="text-zinc-400 ml-2">(친밀도 {Math.round(selectedCompanion.petState?.relationship.familiarity || 0)} / 충성도 {Math.round(selectedCompanion.petState?.relationship.loyalty || 0)} / 야생성 {Math.round(selectedCompanion.petState?.wildness || 0)})</span>
+                ) : (
+                  <span className="text-zinc-400 ml-2">(신뢰도 {selectedCompanion.bond.trust} / 호감도 {selectedCompanion.bond.affection})</span>
+                )}
               </div>
             </div>
             {selectedCompanion.assignedFacilityId && (
@@ -195,22 +234,104 @@ export const CompanionsTab: React.FC<CompanionsTabProps> = ({
             <div className="p-3 bg-zinc-950/60 rounded-xl border border-zinc-800 space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-bold text-zinc-200">성욕</span>
-                <span className="text-zinc-400">{Math.round(selectedCompanion.needs?.desire || 0)} / 100 · {getNeedStageLabel(selectedCompanion.needs?.desire || 0)}</span>
+                <span className="text-zinc-400">{Math.round(selectedCompanion.kind === 'PET' ? (selectedCompanion.petState?.needs.desire || 0) : (selectedCompanion.needs?.desire || 0))} / 100 · {getNeedStageLabel(selectedCompanion.kind === 'PET' ? (selectedCompanion.petState?.needs.desire || 0) : (selectedCompanion.needs?.desire || 0))}</span>
               </div>
               <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden">
-                <div className="h-full bg-rose-500" style={{ width: `${Math.min(100, Math.max(0, selectedCompanion.needs?.desire || 0))}%` }} />
+                <div className="h-full bg-rose-500" style={{ width: `${Math.min(100, Math.max(0, selectedCompanion.kind === 'PET' ? (selectedCompanion.petState?.needs.desire || 0) : (selectedCompanion.needs?.desire || 0)))}%` }} />
               </div>
             </div>
             <div className="p-3 bg-zinc-950/60 rounded-xl border border-zinc-800 space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-zinc-200">배설 욕구(소변)</span>
-                <span className="text-zinc-400">{Math.round(selectedCompanion.needs?.urinationUrge || 0)} / 100 · {getNeedStageLabel(selectedCompanion.needs?.urinationUrge || 0)}</span>
+                <span className="font-bold text-zinc-200">{selectedCompanion.kind === 'PET' ? '배설 욕구' : '배설 욕구(소변)'}</span>
+                <span className="text-zinc-400">{Math.round(selectedCompanion.kind === 'PET' ? (selectedCompanion.petState?.needs.bathroomUrge || 0) : (selectedCompanion.needs?.urinationUrge || 0))} / 100 · {getNeedStageLabel(selectedCompanion.kind === 'PET' ? (selectedCompanion.petState?.needs.bathroomUrge || 0) : (selectedCompanion.needs?.urinationUrge || 0))}</span>
               </div>
               <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden">
-                <div className="h-full bg-sky-500" style={{ width: `${Math.min(100, Math.max(0, selectedCompanion.needs?.urinationUrge || 0))}%` }} />
+                <div className="h-full bg-sky-500" style={{ width: `${Math.min(100, Math.max(0, selectedCompanion.kind === 'PET' ? (selectedCompanion.petState?.needs.bathroomUrge || 0) : (selectedCompanion.needs?.urinationUrge || 0)))}%` }} />
               </div>
             </div>
           </div>
+
+          {selectedCompanion.kind === 'PET' && selectedCompanion.petState && (
+            <div className="p-3 bg-zinc-950/60 rounded-xl border border-zinc-800 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-zinc-200">펫 장착 칸</div>
+                <div className="text-[11px] text-zinc-500 mt-0.5">
+                  {playerState.equippedPetId === selectedCompanion.id ? `${selectedCompanion.name} 장착 중` : playerState.equippedPetId ? '다른 펫이 장착되어 있습니다.' : '비어 있음'}
+                </div>
+              </div>
+              {playerState.equippedPetId === selectedCompanion.id ? (
+                <button disabled={petInteractionLoading} onClick={() => onSetEquippedPet(null)} className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-zinc-200">장착 해제</button>
+              ) : (
+                <button disabled={petInteractionLoading} onClick={() => onSetEquippedPet(selectedCompanion.id)} className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-xs font-bold text-white">이 펫 장착</button>
+              )}
+            </div>
+          )}
+
+          {selectedCompanion.kind === 'PET' && selectedCompanion.petState && (() => {
+            const rates = getPetCommandRates(selectedCompanion);
+            return (
+              <div className="p-3 bg-zinc-950/60 rounded-xl border border-zinc-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-bold text-zinc-200">펫 유대 · 길들이기</div>
+                    <div className="text-[11px] text-zinc-500 mt-0.5">{!selectedPetIsEquipped ? '이 펫을 장착해야 돌봄 기능을 사용할 수 있습니다. · ' : ''}유대 EXP {Math.round(selectedCompanion.bond.bondExp)} · 유대 Lv.{selectedCompanion.bond.bondLevel} · 성장 Lv.{selectedCompanion.petState.growth.level}</div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="bg-zinc-900 rounded p-2"><div className="text-zinc-500">등급</div><div className="font-bold text-amber-200">{PET_GRADE_LABELS[selectedCompanion.petState.growth.grade]} · 성장 Lv.{selectedCompanion.petState.growth.level}</div></div>
+                  <div className="bg-zinc-900 rounded p-2 flex items-center justify-between gap-2"><div><div className="text-zinc-500">신진대사 강화</div><div className="font-bold text-sky-200">Lv.{selectedCompanion.petState.growth.metabolismBoost} / 5</div></div><button disabled={petInteractionLoading || !selectedPetIsEquipped || selectedCompanion.petState.growth.metabolismBoost >= 5} onClick={() => onUpgradePetMetabolism(selectedCompanion.id)} className="px-2 py-1 rounded bg-sky-900/70 hover:bg-sky-800 disabled:opacity-40 text-[10px] font-bold text-sky-100">강화</button></div>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                  <div className="bg-zinc-900 rounded p-2"><div className="text-zinc-500">명령 수행</div><div className="font-bold text-emerald-300">{rates.obedienceChance}%</div></div>
+                  <div className="bg-zinc-900 rounded p-2"><div className="text-zinc-500">독자 행동</div><div className="font-bold text-amber-300">{rates.independentActionChance}%</div></div>
+                  <div className="bg-zinc-900 rounded p-2"><div className="text-zinc-500">명령 실패</div><div className="font-bold text-zinc-300">{rates.failureChance}%</div></div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {(Object.keys(PET_CARE_LABELS) as PetCareAction[]).map((action) => (
+                    <button
+                      key={action}
+                      disabled={petInteractionLoading || !selectedPetIsEquipped} onClick={() => onPetCare(selectedCompanion.id, action)}
+                      className={action === 'TAME'
+                        ? 'px-2 py-2 rounded-lg bg-pink-200 hover:bg-pink-300 border border-pink-300 text-[11px] font-bold text-pink-950 shadow-sm disabled:opacity-50'
+                        : 'px-2 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[11px] font-bold text-zinc-200 disabled:opacity-40'}
+                    >
+                      {PET_CARE_LABELS[action]}
+                    </button>
+                  ))}
+                </div>
+                <div className="space-y-1.5">
+                  <div className="text-[10px] font-bold text-zinc-400">인벤토리 먹이</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {getPetFoodOptions(playerState, selectedCompanion.id).map((food) => (
+                      <button key={food.itemId} disabled={petInteractionLoading || !selectedPetIsEquipped} onClick={() => onFeedPet(selectedCompanion.id, food.itemId)} className="px-2 py-1.5 rounded-lg bg-lime-950/50 hover:bg-lime-900/60 border border-lime-800/60 text-[10px] font-bold text-lime-200">
+                        {food.name} ×{food.quantity}{food.preference === 'FAVORITE' ? ' ★' : ''}
+                      </button>
+                    ))}
+                    {getPetFoodOptions(playerState, selectedCompanion.id).length === 0 && <span className="text-[10px] text-zinc-600">현재 줄 수 있는 선호 먹이가 없습니다.</span>}
+                  </div>
+                </div>
+                <div className="text-[10px] text-zinc-500">먹이·놀아주기·손질·길들이기·신진대사 강화는 현재 장착된 펫에게만 사용할 수 있습니다. 먹이는 인벤토리에서 실제 1개 소비됩니다. 같은 날 같은 돌봄을 반복하면 효율이 감소합니다. 길들이기는 성욕·배설 욕구와 야생성을 낮춥니다. 전투 중 펫은 친밀·충성·야생성에 따라 명령 수행/독자 행동/실패가 실제 행동에 반영됩니다.</div>
+              </div>
+            );
+          })()}
+
+          {selectedCompanion.kind === 'PET' && selectedPetIsEquipped && selectedCompanion.petState?.requestState.activeNeed && (
+            <div className="p-3 bg-emerald-950/30 rounded-xl border border-emerald-800/50 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-emerald-200">현재 펫 요청</div>
+                  <div className="text-[11px] text-zinc-400 mt-0.5">
+                    {selectedCompanion.petState.requestState.activeNeed === 'DESIRE' ? '성욕' : '배설 욕구'} · 임계 {selectedCompanion.petState.requestState.threshold} · 거절 {selectedCompanion.petState.requestState.refusalCount}회
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button disabled={petInteractionLoading} onClick={() => onRespondPetRequest(selectedCompanion.id, 'ACCEPT')} className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-xs font-bold text-white">수락</button>
+                  <button disabled={petInteractionLoading} onClick={() => onRespondPetRequest(selectedCompanion.id, 'REFUSE')} className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-zinc-200">거절</button>
+                </div>
+              </div>
+              <div className="text-[10px] text-zinc-500">연출 문자열은 사용자 작성 슬롯이 비어 있으면 생성 프롬프트에 포함되지 않습니다.</div>
+            </div>
+          )}
 
           {/* 전투 전술 설정 */}
           <div className="space-y-2">

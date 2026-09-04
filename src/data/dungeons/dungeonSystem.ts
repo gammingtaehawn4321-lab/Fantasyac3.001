@@ -1,6 +1,7 @@
 import type { DungeonExplorationState, DungeonKind, DungeonSize, DungeonTileKind, PlayerState, WorldMapLayer, WorldRegionId } from '../../types';
 import { REGIONAL_MONSTERS } from '../world/monsterData';
 import { ADULT_DUNGEON_TRAP_SLOTS, NORMAL_DUNGEON_TRAPS } from './dungeonTrapReferences';
+import { isAdultPhysicalAge } from '../../config/agePolicy';
 
 export interface DungeonDefinition {
   id: string;
@@ -201,7 +202,7 @@ export function getDungeonLayout(dungeonId:string):DungeonLayout{
 export function getDungeonTile(dungeonId:string,tileId:string){return getDungeonLayout(dungeonId).tiles.find(t=>t.id===tileId);}
 export function getAdjacentDungeonTiles(dungeonId:string,tileId:string){const layout=getDungeonLayout(dungeonId),tile=layout.tiles.find(t=>t.id===tileId);if(!tile)return[];return layout.tiles.filter(t=>Math.abs(t.x-tile.x)+Math.abs(t.y-tile.y)===1);}
 
-export function canTriggerAdultDungeonTrap(state:PlayerState,slotId?:string){if(Number(state.profile?.physicalAge||0)<18)return false;const slot=ADULT_DUNGEON_TRAP_SLOTS.find(s=>s.id===slotId);return Boolean(slot&&(slot.name||slot.sceneReference||slot.effectReference));}
+export function canTriggerAdultDungeonTrap(state:PlayerState,slotId?:string){if(!isAdultPhysicalAge(state.profile?.physicalAge))return false;const slot=ADULT_DUNGEON_TRAP_SLOTS.find(s=>s.id===slotId);return Boolean(slot&&(slot.name||slot.sceneReference||slot.effectReference));}
 
 export function createDungeonExplorationState(dungeonId:string,dayCount=1): DungeonExplorationState {
   const layout=getDungeonLayout(dungeonId);

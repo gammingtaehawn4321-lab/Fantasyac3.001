@@ -1,0 +1,22 @@
+[중요] 7.1 적용 순서
+
+구 7.0 runtime patch/workflow ZIP은 사용하지 마세요.
+
+1) 먼저 fantasyac_runtime_7_1_workflows.zip을 풀고 GitHub의 .github/workflows에서 아래 파일만 수동 교체/추가합니다.
+   - unpack.yml
+   - release.yml
+   - validate.yml
+   - game-patch.yml
+   기존 generate-android-signing-key.yml 등 다른 workflow는 그대로 둡니다.
+
+2) Commit 후 Validate가 자동 실행되면 결과를 확인합니다.
+
+3) 그 다음 저장소 루트에 fantasyac_runtime_7_1_patch.zip 하나만 업로드하고 Commit합니다.
+
+4) 새 Unpack Fantasyak ZIP이 성공했는지 확인합니다.
+
+5) Validate Fantasyac가 초록이면 Build & Release Fantasyac를 실행합니다.
+   - version: 3.3.2
+   - Create GitHub Release: OFF
+
+Windows / Android / iOS가 모두 초록이면 3.3.2 런처 테스트 준비 완료입니다.

@@ -14,12 +14,17 @@ import {
   LockDefinition,
   ItemDefinition,
 } from './types';
-import { getItemDefinition } from './data/items';
+import { getItemDefinition, inferItemMetadata } from './data/items';
+import { getBagDefinition } from './data/bags';
 import { getLockDefinition } from './data/locks/lockDatabase';
 import { getMajorCharacter, INITIAL_MAJOR_CHARACTERS } from './data/characters/majorCharacters';
 import { getEncounterDefinition, ENCOUNTER_DATABASE } from './data/encounters/encounterDatabase';
 import { getQuestDefinition, QUEST_DATABASE } from './data/quests/questDatabase';
-import { PROFESSIONS_DATABASE } from './data/professions/professionData';
+import { PROFESSIONS_DATABASE, RECIPE_DATABASE } from './data/professions/professionData';
+import { EQUIPMENT_DATABASE } from './data/equipment/equipmentDatabase';
+import { WORLD_HEX_TILES } from './data/world/worldMapSystem';
+import { STAT_POINTS_PER_LEVEL, TALENT_POINTS_PER_LEVEL, BONUS_TALENT_POINTS_BY_LEVEL, DEFAULT_LEVEL_GROWTH } from './data/combatConfig';
+import { applyProgressionLevelMilestones } from './data/progression/progressionSystem';
 
 // ============================================================
 // 1. 이벤트 리스너 및 훅 시스템 (Event Bus)
@@ -54,6 +59,33 @@ export function subscribeGameEvent(
 // ============================================================
 export function evaluateGameCondition(state: PlayerState, condition?: GameCondition): boolean {
   if (!condition) return true;
+
+  const hasStoryFlag = (flag?: string): boolean => {
+    const normalized = String(flag || '').trim();
+    if (!normalized) return false;
+    return Boolean(
+      state.storyFlags?.includes(normalized) ||
+      state.fate?.fateFlags?.includes(normalized)
+    );
+  };
+
+  // 운명장/스토리 진행 플래그용 원자 조건.
+  // Fate 시스템은 완료한 장의 completionFlags를 storyFlags와 fateFlags에 기록하므로,
+  // 퀘스트/인카운터 쪽에서는 운명 데이터를 직접 참조하지 않고 이 공통 조건만 사용한다.
+  if (condition.type === 'STORY_FLAG') {
+    const flag = typeof condition.target === 'string' && condition.target.trim()
+      ? condition.target
+      : typeof condition.value === 'string'
+        ? condition.value
+        : '';
+    const hasFlag = hasStoryFlag(flag);
+    if (condition.operator === 'NOT_HAS' || condition.operator === 'NEQ') {
+      if (hasFlag) return false;
+    } else if (!hasFlag) {
+      // HAS / EQ / 연산자 생략은 모두 "해당 플래그 보유" 의미로 취급한다.
+      return false;
+    }
+  }
 
   // 1. 논리 조합: NOT
   if (condition.NOT) {
@@ -193,6 +225,14 @@ export function evaluateGameCondition(state: PlayerState, condition?: GameCondit
     }
   }
 
+  // 16. 스토리/운명 플래그
+  // 배열에 적힌 플래그는 모두 충족해야 한다. 운명장의 completionFlags도 동일하게 판정된다.
+  if (condition.storyFlags && condition.storyFlags.length > 0) {
+    for (const flag of condition.storyFlags) {
+      if (!hasStoryFlag(flag)) return false;
+    }
+  }
+
   return true;
 }
 
@@ -215,20 +255,21 @@ export function dispatchGameEvent(
   let nextState = { ...state };
   const messages: string[] = [];
 
-  // 1. 퀘스트 반응 처리
+  // 1. 주요 인물 상태를 먼저 갱신한다. 대화 한 번으로 신뢰 조건을 넘긴 경우
+  // 같은 이벤트에서 바로 퀘스트 제안/완료 판정에 반영되어야 한다.
+  const characterResult = handleMajorCharacterEvent(nextState, event);
+  nextState = characterResult.nextState;
+  messages.push(...characterResult.messages);
+
+  // 2. 퀘스트 반응 처리
   const questResult = handleQuestEvent(nextState, event);
   nextState = questResult.nextState;
   messages.push(...questResult.messages);
 
-  // 2. 인카운터 반응 처리
+  // 3. 인카운터 반응 처리
   const encounterResult = handleEncounterEvent(nextState, event);
   nextState = encounterResult.nextState;
   messages.push(...encounterResult.messages);
-
-  // 3. 주요 인물 기억 및 상호작용 기록
-  const characterResult = handleMajorCharacterEvent(nextState, event);
-  nextState = characterResult.nextState;
-  messages.push(...characterResult.messages);
 
   // 4. 이벤트 버스 리스너 실행
   try {
@@ -273,9 +314,10 @@ export function evaluateStateBasedObjective(
     }
 
     case 'PROFESSION_LEVEL': {
-      const prof = state.professions?.find(
-        (p) => !obj.targetId || p.professionId === obj.targetId
-      );
+      // 특정 직업이 지정된 목표만 상태값(현재 레벨)으로 직접 계산한다.
+      // targetless 가이드 목표는 '레벨업을 한 번 수행'하는 이벤트형 목표다.
+      if (!obj.targetId) return null;
+      const prof = state.professions?.find((p) => p.professionId === obj.targetId);
       return prof ? prof.level : 0;
     }
 
@@ -293,7 +335,7 @@ export function evaluateStateBasedObjective(
       }
       const companion = state.companions?.find((c) => c.id === obj.targetId);
       if (companion) {
-        return companion.bondLevel || 0;
+        return companion.bond?.bondLevel ?? companion.bondLevel ?? companion.bond?.trust ?? companion.trust ?? 0;
       }
       return 0;
     }
@@ -312,7 +354,11 @@ function handleQuestEvent(
 ): { nextState: PlayerState; messages: string[] } {
   let nextState = { ...state };
   const messages: string[] = [];
-  const quests = { ...(nextState.quests || {}) };
+  // 각 QuestProgress/objectives도 복제하여 이전 상태를 직접 변이시키지 않는다.
+  const quests: Record<string, QuestProgress> = Object.fromEntries(
+    Object.entries(nextState.quests || {}).map(([id, progress]) => [id, { ...progress, objectives: { ...(progress.objectives || {}) } }])
+  );
+  const questAlertIds = new Set<string>(nextState.questAlertQuestIds || []);
   let hasChanges = false;
 
   // 1. 활성 퀘스트 진행도 갱신
@@ -335,7 +381,7 @@ function handleQuestEvent(
       const updatedObjectives = { ...(progress.objectives || {}) };
 
       for (const obj of currentStage.objectives) {
-        const objState = { ...(updatedObjectives[obj.id] || { currentCount: 0, isCompleted: false }) };
+        const objState = { ...(updatedObjectives[obj.id] || { currentCount: 0, isCompleted: false }), seenKeys: [...(updatedObjectives[obj.id]?.seenKeys || [])] };
         if (objState.isCompleted) {
           updatedObjectives[obj.id] = objState;
           continue;
@@ -344,7 +390,10 @@ function handleQuestEvent(
         let delta = 0;
         let directCount: number | null = evaluateStateBasedObjective(nextState, obj);
 
-        switch (obj.type) {
+        // 한 번의 외부 이벤트는 현재 단계에서만 소비한다.
+        // 단계가 넘어간 뒤 같은 이벤트가 다음 단계의 이벤트형 목표까지 연쇄 완료시키는 것을 막고,
+        // POSSESS_ITEM / PROFESSION_LEVEL / CAMP_FACILITY / COMPANION_BOND 같은 상태 기반 목표만 재평가한다.
+        if (stageIterations === 1) switch (obj.type) {
           case 'GAIN_ITEM':
             if (event.type === 'ITEM_GAINED') {
               const matchesId = obj.targetId && (event.payload.itemId === obj.targetId || event.payload.itemName === obj.targetId);
@@ -362,6 +411,7 @@ function handleQuestEvent(
           case 'USE_ITEM':
             if (event.type === 'ITEM_USED') {
               if (
+                (!obj.targetId && !obj.targetName) ||
                 (obj.targetId && event.payload.itemId === obj.targetId) ||
                 (obj.targetName && event.payload.itemName?.includes(obj.targetName))
               ) {
@@ -373,6 +423,7 @@ function handleQuestEvent(
           case 'READ_BOOK':
             if (event.type === 'ITEM_READ') {
               if (
+                (!obj.targetId && !obj.targetName) ||
                 (obj.targetId && event.payload.itemId === obj.targetId) ||
                 (obj.targetName && event.payload.itemName?.includes(obj.targetName))
               ) {
@@ -430,7 +481,7 @@ function handleQuestEvent(
 
           case 'UNLOCK_LOCK':
             if (event.type === 'LOCK_UNLOCKED') {
-              if (obj.targetId && event.payload.lockId === obj.targetId) {
+              if (!obj.targetId || event.payload.lockId === obj.targetId) {
                 delta = 1;
               }
             }
@@ -448,7 +499,15 @@ function handleQuestEvent(
                 (event.payload.location?.includes(obj.targetName) ||
                   event.payload.locationName?.includes(obj.targetName));
               if (!obj.targetId && !obj.targetName) {
-                delta = 1;
+                const locationKey = String(event.payload.locationId || event.payload.location || event.payload.locationName || '').trim();
+                if (obj.requiredCount > 1 && locationKey) {
+                  if (!objState.seenKeys?.includes(locationKey)) {
+                    objState.seenKeys = [...(objState.seenKeys || []), locationKey];
+                    delta = 1;
+                  }
+                } else {
+                  delta = 1;
+                }
               } else if (matchesId || matchesName) {
                 delta = 1;
               }
@@ -457,8 +516,11 @@ function handleQuestEvent(
 
           case 'PROFESSION_LEVEL':
             if (event.type === 'PROFESSION_LEVEL_UP') {
-              if (!obj.targetId || event.payload.professionId === obj.targetId) {
+              if (obj.targetId && event.payload.professionId === obj.targetId) {
                 directCount = event.payload.newLevel || 1;
+              } else if (!obj.targetId) {
+                directCount = null;
+                delta = 1;
               }
             }
             break;
@@ -480,8 +542,12 @@ function handleQuestEvent(
 
           case 'COMPANION_BOND':
             if (event.type === 'COMPANION_BOND_CHANGED') {
-              const char = nextState.majorCharacters?.[obj.targetId || ''];
-              directCount = char ? char.trust : event.payload.trustDelta || 0;
+              const targetId = obj.targetId || event.payload.companionId || event.payload.characterId;
+              const char = targetId ? nextState.majorCharacters?.[targetId] : undefined;
+              const companion = targetId ? nextState.companions?.find((c) => c.id === targetId) : undefined;
+              if (char) directCount = char.trust ?? char.relationship ?? 0;
+              else if (companion) directCount = companion.bond?.bondLevel ?? companion.bondLevel ?? companion.bond?.trust ?? companion.trust ?? 0;
+              else if (!obj.targetId) { directCount = null; delta = Math.max(0, Number(event.payload.trustDelta || 0)); }
             }
             break;
 
@@ -558,8 +624,12 @@ function handleQuestEvent(
 
           case 'GATHER_RESOURCE':
             if (event.type === 'RESOURCE_GATHERED') {
-              const matches = !obj.targetId || event.payload.gatheredMaterialId === obj.targetId || event.payload.gatheredMaterialName === obj.targetName;
-              if (matches) delta = event.payload.quantity || 1;
+              // 구/신 호출부의 payload 키를 모두 허용한다. 한쪽 이름만 바뀌어 퀘스트가 영구 정지하는 회귀를 방지한다.
+              const materialId = event.payload.gatheredMaterialId || event.payload.resourceId || event.payload.itemId;
+              const materialName = event.payload.gatheredMaterialName || event.payload.resourceName || event.payload.itemName;
+              const matchesId = !obj.targetId || materialId === obj.targetId;
+              const matchesName = !obj.targetName || materialName?.includes(obj.targetName);
+              if (matchesId && matchesName) delta = event.payload.quantity || 1;
             }
             break;
         }
@@ -582,38 +652,35 @@ function handleQuestEvent(
           objState.isCompleted = true;
           stageProgressChanged = true;
           messages.push(`📜 [퀘스트 목표 달성] ${def.title} - ${obj.description}`);
+          questAlertIds.add(questId);
         }
 
         updatedObjectives[obj.id] = objState;
       }
 
-      if (stageProgressChanged) {
+      // 상태 기반 조건이 이미 충족된 세이브도 이벤트 종류와 무관하게 매번 완료 판정을 복구한다.
+      progress.objectives = updatedObjectives;
+      if (stageProgressChanged) hasChanges = true;
+
+      const requiredObjectives = currentStage.objectives.filter((o) => !o.optional);
+      const allRequiredCompleted = requiredObjectives.length === 0 || requiredObjectives.every((o) => updatedObjectives[o.id]?.isCompleted);
+
+      if (allRequiredCompleted) {
         hasChanges = true;
-        progress.objectives = updatedObjectives;
-
-        // 현재 단계의 모든 필수 목표가 완료되었는지 검사
-        const allRequiredCompleted = currentStage.objectives
-          .filter((o) => !o.optional)
-          .every((o) => updatedObjectives[o.id]?.isCompleted);
-
-        if (allRequiredCompleted) {
-          if (currentStage.nextStageId) {
-            progress.currentStageId = currentStage.nextStageId;
-            const nextStageDef = def.stages.find((s) => s.stageId === currentStage.nextStageId);
-            messages.push(`✨ [퀘스트 단계 완료] ${def.title} -> 다음 단계: ${nextStageDef?.title || '진행'}`);
-            // 새 단계의 상태 기반 목표도 즉시 재검사하기 위해 반복
-            stageLoop = true;
-          } else {
-            // 퀘스트 최종 완료!
-            progress.status = 'COMPLETED';
-            progress.completedAt = Date.now();
-            messages.push(`🏆 [퀘스트 완료] ${def.title}! 보상을 획득했습니다.`);
-
-            // 보상 지급 실행
-            const rewardedState = grantQuestRewards(nextState, def.rewards);
-            nextState = rewardedState.state;
-            messages.push(...rewardedState.messages);
-          }
+        questAlertIds.add(questId);
+        if (currentStage.nextStageId) {
+          progress.currentStageId = currentStage.nextStageId;
+          const nextStageDef = def.stages.find((s) => s.stageId === currentStage.nextStageId);
+          messages.push(`✨ [퀘스트 단계 완료] ${def.title} -> 다음 단계: ${nextStageDef?.title || '진행'}`);
+          stageLoop = true;
+        } else {
+          progress.status = 'COMPLETED';
+          progress.completedAt = Date.now();
+          messages.push(`🏆 [퀘스트 완료] ${def.title}! 보상을 획득했습니다.`);
+          const rewardedState = grantQuestRewards({ ...nextState, quests }, def.rewards);
+          nextState = rewardedState.state;
+          Object.assign(quests, nextState.quests || {});
+          messages.push(...rewardedState.messages);
         }
       }
     }
@@ -688,6 +755,7 @@ function handleQuestEvent(
           quests[def.id] = newProgress;
           hasChanges = true;
           messages.push(`🌟 [새로운 퀘스트 시작] ${def.title}: ${def.summary || def.description}`);
+          questAlertIds.add(def.id);
         } else {
           quests[def.id] = {
             questId: def.id,
@@ -698,6 +766,7 @@ function handleQuestEvent(
           hasChanges = true;
           const giverDisplay = def.giverName || majorChar?.name || charName || '주요 인물';
           messages.push(`📜 [퀘스트 의뢰] ${giverDisplay}이(가) [${def.title}] 의뢰를 제안했습니다. (퀘스트 일지에서 수락 가능)`);
+          questAlertIds.add(def.id);
         }
       }
     });
@@ -729,6 +798,7 @@ function handleQuestEvent(
               };
               if (isComp) {
                 messages.push(`📜 [퀘스트 목표 달성] ${def.title} - ${obj.description}`);
+                questAlertIds.add(def.id);
               }
             }
           }
@@ -743,10 +813,12 @@ function handleQuestEvent(
               newProgress.currentStageId = firstStage.nextStageId;
               const nextStageDef = def.stages.find((s) => s.stageId === firstStage.nextStageId);
               messages.push(`✨ [퀘스트 단계 완료] ${def.title} -> 다음 단계: ${nextStageDef?.title || '진행'}`);
+              questAlertIds.add(def.id);
             } else {
               newProgress.status = 'COMPLETED';
               newProgress.completedAt = Date.now();
               messages.push(`🏆 [퀘스트 완료] ${def.title}! 보상을 획득했습니다.`);
+              questAlertIds.add(def.id);
               const rewardedState = grantQuestRewards(nextState, def.rewards);
               nextState = rewardedState.state;
               messages.push(...rewardedState.messages);
@@ -757,15 +829,58 @@ function handleQuestEvent(
         quests[def.id] = newProgress;
         hasChanges = true;
         messages.push(`🌟 [새로운 퀘스트 시작] ${def.title}: ${def.summary}`);
+        questAlertIds.add(def.id);
       }
     }
   });
 
-  if (hasChanges) {
-    nextState.quests = quests;
-  }
+  if (hasChanges) nextState.quests = quests;
+  nextState.questAlertQuestIds = Array.from(questAlertIds).filter((id) => Boolean(nextState.quests?.[id]));
 
   return { nextState, messages };
+}
+
+/** 퀘스트 보상 EXP도 일반 EXP와 동일한 다중 레벨업/마일스톤을 적용한다. */
+function applyQuestRewardExperience(state: PlayerState, expGain: number): { state: PlayerState; message?: string } {
+  const gain = Math.max(0, Math.floor(Number(expGain) || 0));
+  if (gain <= 0) return { state };
+
+  const oldLevel = Math.max(1, Math.floor(Number(state.level) || 1));
+  let level = oldLevel;
+  let exp = Math.max(0, Number(state.experience) || 0) + gain;
+  let statPoints = Math.max(0, Number(state.statPoints) || 0);
+  let talentPoints = Math.max(0, Number(state.talentPoints) || 0);
+  let earnedStat = 0;
+  let earnedTalent = 0;
+
+  while (true) {
+    const diff = level - 1;
+    const needed = 100 + 50 * diff + 10 * diff * diff;
+    if (exp < needed) break;
+    exp -= needed;
+    level += 1;
+    const statBonus = STAT_POINTS_PER_LEVEL;
+    const talentBonus = TALENT_POINTS_PER_LEVEL + (BONUS_TALENT_POINTS_BY_LEVEL[level] || 0);
+    statPoints += statBonus;
+    talentPoints += talentBonus;
+    earnedStat += statBonus;
+    earnedTalent += talentBonus;
+  }
+
+  let next: PlayerState = { ...state, level, experience: exp, statPoints, talentPoints };
+  if (level > oldLevel) {
+    const gainedLevels = level - oldLevel;
+    // vitality/intelligence/재능 보너스 자체는 변하지 않으므로 레벨 성장분만 더하면 공통 공식과 정확히 같다.
+    const maxHp = Math.max(1, Number(state.maxHp) || 1) + gainedLevels * DEFAULT_LEVEL_GROWTH.hpPerLevel;
+    const maxMana = Math.max(0, Number(state.maxMana) || 0) + gainedLevels * DEFAULT_LEVEL_GROWTH.mpPerLevel;
+    next = { ...next, maxHp, hp: maxHp, maxMana, mana: maxMana };
+    next = applyProgressionLevelMilestones(next, oldLevel, level);
+    return {
+      state: next,
+      message: `✨ 레벨 업! Lv.${oldLevel} ➔ Lv.${level} (스탯 +${earnedStat}, 재능 +${earnedTalent}, 패시브 해방석 +${gainedLevels})`,
+    };
+  }
+  return { state: next };
 }
 
 /**
@@ -777,11 +892,14 @@ export function grantQuestRewards(
 ): { state: PlayerState; messages: string[] } {
   let nextState = { ...state };
   const messages: string[] = [];
+  const rewardEvents: Array<{ type: GameEventType; payload: GameEventPayload }> = [];
 
   // EXP & 루피
   if (rewards.exp) {
-    nextState.experience = (nextState.experience || 0) + rewards.exp;
+    const expResult = applyQuestRewardExperience(nextState, rewards.exp);
+    nextState = expResult.state;
     messages.push(`• 경험치 +${rewards.exp}`);
+    if (expResult.message) messages.push(expResult.message);
   }
   if (rewards.rupees) {
     nextState.rupees = (nextState.rupees || 0) + rewards.rupees;
@@ -800,25 +918,190 @@ export function grantQuestRewards(
 
   // 아이템 지급
   if (rewards.items && rewards.items.length > 0) {
-    const inv = [...nextState.inventory];
+    let inv = nextState.inventory.map((entry) => ({ ...entry }));
+    let equippedBagId = nextState.equippedBagId;
     for (const rewardItem of rewards.items) {
       const def = getItemDefinition(rewardItem.itemId || rewardItem.name);
-      const existing = inv.find((i) => (def && i.id === def.id) || i.name === rewardItem.name);
+      const bagDef = getBagDefinition(rewardItem.itemId || rewardItem.name);
+      const inferred = inferItemMetadata(rewardItem.itemId || rewardItem.name);
+      const itemId = def?.id || bagDef?.id || rewardItem.itemId;
+      const existing = inv.find((i) => (itemId && i.id === itemId) || (bagDef && i.bagId === bagDef.id) || i.name === rewardItem.name);
       if (existing) {
         existing.quantity += rewardItem.quantity;
+        if (bagDef) existing.bagId = bagDef.id;
       } else {
         inv.push({
-          id: def ? def.id : rewardItem.itemId,
+          id: itemId,
           name: rewardItem.name,
           quantity: rewardItem.quantity,
-          category: def ? def.category : 'MISC',
-          description: def ? def.description : '퀘스트 보상으로 획득한 물품',
+          bagId: bagDef?.id,
+          category: def?.category || (bagDef ? 'EQUIPMENT' : inferred.category),
+          description: def?.description || bagDef?.description || inferred.description,
+          flavorText: def?.flavorText || bagDef?.flavorText,
+          illustrationUrl: def?.illustrationUrl || bagDef?.illustrationUrl,
           quality: rewardItem.quality || 'NORMAL',
         });
       }
+      // 기존 가방이 없거나 잘못된 ID인 경우 최초 획득 가방을 즉시 장착한다.
+      if (bagDef && !getBagDefinition(equippedBagId || '')) {
+        const idx = inv.findIndex((i) => i.bagId === bagDef.id || i.id === bagDef.id || i.name === bagDef.name);
+        if (idx >= 0) {
+          const entry = inv[idx];
+          if (entry.quantity > 1) inv[idx] = { ...entry, quantity: entry.quantity - 1 };
+          else inv.splice(idx, 1);
+          equippedBagId = bagDef.id;
+          messages.push(`• ${bagDef.name} 자동 장착`);
+        }
+      }
+      rewardEvents.push({ type: 'ITEM_GAINED', payload: { itemId, itemName: def?.name || bagDef?.name || rewardItem.name, quantity: rewardItem.quantity, quality: rewardItem.quality } });
       messages.push(`• ${rewardItem.name} x${rewardItem.quantity} 획득`);
     }
     nextState.inventory = inv;
+    nextState.equippedBagId = equippedBagId;
+  }
+
+  // 별도 장비 보상. QuestRewards.equipmentIds가 정의만 되고 지급되지 않던 경로를 실제 인벤토리에 연결한다.
+  if (rewards.equipmentIds?.length) {
+    const inv = (nextState.inventory || []).map((entry) => ({ ...entry }));
+    for (const equipmentId of rewards.equipmentIds) {
+      const eq = EQUIPMENT_DATABASE[equipmentId];
+      if (!eq) {
+        console.warn(`[QuestReward] Unknown equipmentId: ${equipmentId}`);
+        continue;
+      }
+      const existing = inv.find((i) => i.equipmentId === eq.id || i.id === eq.id);
+      if (existing) existing.quantity += 1;
+      else inv.push({
+        id: eq.id,
+        equipmentId: eq.id,
+        name: eq.name,
+        quantity: 1,
+        category: 'EQUIPMENT',
+        description: eq.description || eq.equipDescription || `${eq.name} 장비입니다.`,
+        flavorText: eq.flavorText,
+        illustrationUrl: eq.illustrationUrl,
+        quality: 'NORMAL',
+      });
+      rewardEvents.push({ type: 'ITEM_GAINED', payload: { itemId: eq.id, itemName: eq.name, quantity: 1 } });
+      messages.push(`• 장비 [${eq.name}] 획득`);
+    }
+    nextState.inventory = inv;
+  }
+
+  // 열쇠 보상. 잠금 해제 전까지 일반 인벤토리의 KEY 아이템으로 유지한다.
+  if (rewards.keyIds?.length) {
+    const inv = (nextState.inventory || []).map((entry) => ({ ...entry }));
+    for (const keyId of rewards.keyIds) {
+      const def = getItemDefinition(keyId);
+      const name = def?.name || keyId;
+      const existing = inv.find((i) => i.id === (def?.id || keyId) || i.name === name);
+      if (existing) existing.quantity += 1;
+      else inv.push({
+        id: def?.id || keyId,
+        name,
+        quantity: 1,
+        category: 'KEY',
+        description: def?.description || `${name}. 특정 잠금 장치를 해제하는 데 사용합니다.`,
+        flavorText: def?.flavorText,
+        illustrationUrl: def?.illustrationUrl,
+        quality: 'NORMAL',
+      });
+      rewardEvents.push({ type: 'ITEM_GAINED', payload: { itemId: def?.id || keyId, itemName: name, quantity: 1 } });
+      messages.push(`• 열쇠 [${name}] 획득`);
+    }
+    nextState.inventory = inv;
+  }
+
+  // 생활 직업 경험치 보상. 여러 레벨을 한 번에 넘는 보상도 누락되지 않게 반복 승급한다.
+  if (rewards.professionExp) {
+    const { professionId, exp } = rewards.professionExp;
+    const professions = [...(nextState.professions || [])];
+    let index = professions.findIndex((p) => p.professionId === professionId);
+    if (index < 0) {
+      professions.push({ professionId, level: 1, exp: 0, learnedRecipes: [], learnedPerks: [], skillPoints: 0 });
+      index = professions.length - 1;
+    }
+    const prof = { ...professions[index], learnedRecipes: [...(professions[index].learnedRecipes || [])], learnedPerks: [...(professions[index].learnedPerks || [])] };
+    const oldProfessionLevel = prof.level;
+    prof.exp = (prof.exp || 0) + Math.max(0, exp || 0);
+    while (prof.level < 60) {
+      const needed = prof.level * 100;
+      if (prof.exp < needed) break;
+      prof.exp -= needed;
+      prof.level += 1;
+      prof.skillPoints = (prof.skillPoints || 0) + 1;
+    }
+    if (prof.level >= 60) prof.exp = 0;
+    professions[index] = prof;
+    nextState.professions = professions;
+    for (let reached = oldProfessionLevel + 1; reached <= prof.level; reached += 1) {
+      rewardEvents.push({ type: 'PROFESSION_LEVEL_UP', payload: { professionId, newLevel: reached } });
+    }
+    messages.push(`• ${PROFESSIONS_DATABASE[professionId]?.name || professionId} 경험치 +${exp}`);
+  }
+
+  // 레시피 해금 보상. 정의된 레시피의 소속 생활 직업에 배운 레시피를 기록한다.
+  if (rewards.recipes?.length) {
+    const professions = [...(nextState.professions || [])].map((p) => ({ ...p, learnedRecipes: [...(p.learnedRecipes || [])] }));
+    for (const recipeId of rewards.recipes) {
+      const recipe = RECIPE_DATABASE[recipeId];
+      if (!recipe) {
+        console.warn(`[QuestReward] Unknown recipeId: ${recipeId}`);
+        continue;
+      }
+      let index = professions.findIndex((p) => p.professionId === recipe.professionId);
+      if (index < 0) {
+        professions.push({ professionId: recipe.professionId, level: 1, exp: 0, learnedRecipes: [], learnedPerks: [], skillPoints: 0 });
+        index = professions.length - 1;
+      }
+      if (!professions[index].learnedRecipes.includes(recipeId)) {
+        professions[index].learnedRecipes.push(recipeId);
+        messages.push(`• 제작법 [${recipe.name}] 습득`);
+      }
+    }
+    nextState.professions = professions;
+  }
+
+  // 동료 신뢰도 보상.
+  if (rewards.companionTrust) {
+    const { companionId, delta } = rewards.companionTrust;
+    const companions = (nextState.companions || []).map((c) => {
+      if (c.id !== companionId) return c;
+      const oldTrust = c.bond?.trust ?? c.trust ?? 0;
+      const trust = Math.min(100, Math.max(0, oldTrust + delta));
+      return { ...c, trust, bond: { ...c.bond, trust } };
+    });
+    nextState.companions = companions;
+    const companion = companions.find((c) => c.id === companionId);
+    if (companion) {
+      rewardEvents.push({ type: 'COMPANION_BOND_CHANGED', payload: { companionId, companionName: companion.name, trustDelta: delta, bondLevel: companion.bond?.bondLevel ?? companion.bondLevel } });
+      messages.push(`• ${companion.name} 신뢰도 ${delta >= 0 ? '+' : ''}${delta}`);
+    }
+  }
+
+  // 세력 평판 보상. 정의만 존재하던 값을 PlayerState에 보존한다.
+  if (rewards.reputationDelta) {
+    const { faction, delta } = rewards.reputationDelta;
+    const rep = { ...(nextState.factionReputation || {}) };
+    rep[faction] = (rep[faction] || 0) + delta;
+    nextState.factionReputation = rep;
+    messages.push(`• ${faction} 평판 ${delta >= 0 ? '+' : ''}${delta}`);
+  }
+
+  // 지역 해금 보상. 월드맵 접근 플래그에 기록하고 실제 hex id라면 지도에도 발견 처리한다.
+  if (rewards.unlockedLocations?.length) {
+    const unlocked = rewards.unlockedLocations.filter(Boolean);
+    const discovered = new Set(nextState.worldMap?.discoveredHexIds || []);
+    for (const id of unlocked) {
+      if (id && WORLD_HEX_TILES[id]) discovered.add(id);
+    }
+    nextState.worldMap = {
+      ...nextState.worldMap,
+      accessFlags: Array.from(new Set([...(nextState.worldMap?.accessFlags || []), ...unlocked])),
+      discoveredHexIds: Array.from(discovered),
+      mapRevision: (nextState.worldMap?.mapRevision || 0) + 1,
+    };
+    messages.push(`• 새로운 지역/경로 해금: ${unlocked.join(', ')}`);
   }
 
   // 주요 인물 관계도 상승
@@ -852,6 +1135,15 @@ export function grantQuestRewards(
       }
     }
     nextState.quests = quests;
+    nextState.questAlertQuestIds = Array.from(new Set([...(nextState.questAlertQuestIds || []), ...rewards.followUpQuestIds.filter((id)=>quests[id]?.status==='OFFERED')]));
+  }
+
+  // 보상으로 생긴 실제 상태 변화도 중앙 이벤트 버스에 전달한다.
+  // 퀘스트 완료 상태를 먼저 커밋한 뒤 처리하므로 자기 자신을 재완료하지 않고 연계 퀘스트만 정상 진행한다.
+  for (const rewardEvent of rewardEvents) {
+    const eventResult = dispatchGameEvent(nextState, rewardEvent.type, rewardEvent.payload);
+    nextState = eventResult.nextState;
+    if (eventResult.messages.length > 0) messages.push(...eventResult.messages);
   }
 
   return { state: nextState, messages };
@@ -877,7 +1169,7 @@ function handleEncounterEvent(
         status: 'ACTIVE',
         currentStep: encounters[encId]?.currentStep || 1,
       };
-      nextState = { ...nextState, encounters, activeEncounterId: encId };
+      nextState = { ...nextState, encounters, activeEncounterId: encId, worldMap: { ...nextState.worldMap, activeEncounterHexId: nextState.worldMap.currentHexId } };
     }
   }
 
@@ -891,7 +1183,7 @@ function handleEncounterEvent(
         outcome: event.payload.encounterOutcome || 'RESOLVED',
         resolvedAt: Date.now(),
       };
-      nextState = { ...nextState, encounters, activeEncounterId: nextState.activeEncounterId === encId ? null : nextState.activeEncounterId };
+      nextState = { ...nextState, encounters, activeEncounterId: nextState.activeEncounterId === encId ? null : nextState.activeEncounterId, worldMap: { ...nextState.worldMap, activeEncounterHexId: nextState.activeEncounterId === encId ? null : nextState.worldMap.activeEncounterHexId } };
 
       // 인카운터 자체 보상: 사용자 작성 슬롯도 rewards를 채우면 자동 지급된다.
       if (def?.rewards && Object.keys(def.rewards).length > 0) {
@@ -934,7 +1226,7 @@ function handleEncounterEvent(
         outcome: event.payload.encounterOutcome || 'FAILED',
         resolvedAt: Date.now(),
       };
-      nextState = { ...nextState, encounters, activeEncounterId: nextState.activeEncounterId === encId ? null : nextState.activeEncounterId };
+      nextState = { ...nextState, encounters, activeEncounterId: nextState.activeEncounterId === encId ? null : nextState.activeEncounterId, worldMap: { ...nextState.worldMap, activeEncounterHexId: nextState.activeEncounterId === encId ? null : nextState.worldMap.activeEncounterHexId } };
 
       if (def?.chainOnFail) {
         const scheduled = [...(nextState.scheduledEncounters || [])];
@@ -978,6 +1270,8 @@ function handleMajorCharacterEvent(
           relationship: Math.min(100, Math.max(-100, baseChar.relationship + talkGain)),
           trust: Math.min(100, Math.max(0, baseChar.trust + talkGain)),
           memoryFlags: { ...(baseChar.memoryFlags || {}) },
+          hasMet: true,
+          currentHexId: nextState.worldMap?.currentHexId || baseChar.currentHexId,
           interactionHistory: [
             ...(baseChar.interactionHistory || []),
             { timestamp: Date.now(), summary: `${event.type === 'CHARACTER_TALKED' ? '대화' : '조우'} (${new Date().toLocaleDateString()})` },

@@ -1,3 +1,4 @@
+import { rollPetCommandOutcome } from '../data/pets/petProgression';
 import {
   BattleActor,
   BattlefieldState,
@@ -33,13 +34,15 @@ import { getTalentNode } from '../data/talents';
 import { getCombatClass, getClassEvolutionById } from '../data/classes';
 import { PASSIVE_DEFINITIONS_V1 } from '../data/progression/progressionData';
 import {
-  EQUIPMENT_DATABASE, EquipmentSlot, resolveEquipmentSetEffects, resolveEquipmentSynergies,
+  EQUIPMENT_DATABASE, EquipmentSlot, EquippedItems, resolveEquipmentSetEffects, resolveEquipmentSynergies,
   getEnhancedEquipmentBaseStats, normalizeEquipmentEnhancementState, resolveRunewordLoadout,
   EQUIPMENT_ENHANCEMENT_MILESTONES, RUNE_LEVEL_BY_MILESTONE,
 } from '../data/equipment';
 import { getItemDefinition } from '../data/items';
+import { POTION_DATABASE } from '../data/potions/potionDatabase';
 import { getMonsterExperienceReward, getMonsterRupeeReward, rollMonsterLoot } from '../data/world/monsterLootSystem';
 import { createEquipmentRuntimeState, hasTrait, onEquipmentTurnEnd, onEquipmentTurnStart, setCounter } from './equipmentRuntime';
+import { isAdultPhysicalAge } from '../config/agePolicy';
 import {
   advanceToNextActor,
   applyActionDelay,
@@ -90,10 +93,13 @@ export function createBattleActorFromCharacter(
   const evolutionDef = getClassEvolutionById((character as PlayerState | CompanionData).classEvolutionId || (character as PlayerState | CompanionData).classEvolutionName);
   const recommendedArmor = classDef?.recommendedArmor;
 
-  const equipment = character.equipment || {};
+  const equipment: EquippedItems = (character.equipment || {}) as EquippedItems;
   const enhancementTable = character.equipmentEnhancements || {};
-  const adultEligible = !!(isPlayer && pState && Number(pState.profile?.physicalAge ?? 0) >= 18);
-  const fluidKinds = new Set(['STANDARD_FLUID', 'INSECTOID_SECRETION', 'URINE', 'OTHER']);
+  const learnedTalents = character.learnedTalents || {};
+  const mainHandDefinition = equipment.MAIN_HAND ? EQUIPMENT_DATABASE[equipment.MAIN_HAND] : undefined;
+  const dualWieldTalentActive = Number(learnedTalents.dancer_chakram_flow || 0) > 0 && mainHandDefinition?.weaponStyle === 'DUAL_WIELD';
+  const adultEligible = !!(isPlayer && pState && isAdultPhysicalAge(pState.profile?.physicalAge));
+  const fluidKinds = new Set(['STANDARD_FLUID', 'INSECTOID_SECRETION', 'URINE']);
   const fluidByCompartment: Record<string, number> = { COMPARTMENT_1: 0, COMPARTMENT_2: 0, COMPARTMENT_3: 0 };
   if (adultEligible && pState) {
     for (const payload of pState.bodyPayloads || []) {
@@ -116,6 +122,9 @@ export function createBattleActorFromCharacter(
   const bonusBaseStats: Record<string, number> = {};
   const grantedSkillIds: string[] = [];
   const traits: string[] = [];
+  // 종족/캐릭터 패시브 ID도 전투 런타임 특성에 노출한다.
+  // 실제 수치 보너스는 기존 종족 스탯 계산/개별 효과 엔진이 담당하고 여기서는 중복 가산하지 않는다.
+  traits.push(...((Array.isArray((character as any).passives) ? (character as any).passives : []).filter(Boolean)));
   const skillModifiers: BattleSkillModifier[] = [];
   const elementResistances: Partial<Record<CombatElement, number>> = {};
   const elementDamageBonuses: Partial<Record<CombatElement, number>> = {};
@@ -158,7 +167,8 @@ export function createBattleActorFromCharacter(
         if (typeof val !== 'number') return;
         let appliedVal = val;
         if (slot === 'OFF_HAND' && (key === 'physicalAttack' || key === 'magicAttack')) {
-          appliedVal = Math.round(appliedVal * DUAL_WIELD_OFFHAND_RATIO);
+          // 차크람 곡예가 활성화된 쌍수 세팅은 보조무기 공격력을 60%가 아닌 100% 반영한다.
+          appliedVal = Math.round(appliedVal * (dualWieldTalentActive ? 1 : DUAL_WIELD_OFFHAND_RATIO));
         }
         const previous = (equipmentBonuses[key] as number) || 0;
         (equipmentBonuses as Record<string, number>)[key] = previous + appliedVal;
@@ -277,7 +287,7 @@ export function createBattleActorFromCharacter(
     traits.push(...(evolutionDef.passive?.traitIds || []));
   }
 
-  // 무희 성인 상태 연동 장비. 성인(physicalAge >= 18)일 때만 위에서 trait 자체가 들어온다.
+  // 무희 성인 상태 연동 장비. agePolicy의 성인 기준을 충족할 때만 위에서 trait 자체가 들어온다.
   const addEquipmentBonus = (key: keyof CombatDerivedStats, value: number) => {
     (equipmentBonuses as Record<string, number>)[key] = Number((Number((equipmentBonuses as Record<string, number>)[key] || 0) + value).toFixed(3));
   };
@@ -309,7 +319,6 @@ export function createBattleActorFromCharacter(
   }
 
   const talentBonuses: Record<string, number> = {};
-  const learnedTalents = character.learnedTalents || {};
   Object.entries(learnedTalents).forEach(([talentId, rank]) => {
     const node = getTalentNode(talentId);
     if (!node || rank <= 0) return;
@@ -320,6 +329,12 @@ export function createBattleActorFromCharacter(
       });
     }
   });
+  // 스킬 정의의 장비 요구 조건을 실제 전투 사용 판정에서 확인할 수 있도록 노출한다.
+  if (mainHandDefinition?.magicWeapon || mainHandDefinition?.weaponStyle === 'MAGIC') traits.push('EQUIP_MAGIC_WEAPON');
+  if (mainHandDefinition?.weaponStyle === 'DUAL_WIELD') traits.push('EQUIP_DUAL_WIELD');
+  for (const tag of mainHandDefinition?.tags || []) traits.push(`WEAPON_TAG:${tag}`);
+  if (mainHandDefinition?.weaponType) traits.push(`WEAPON_TAG:${mainHandDefinition.weaponType}`);
+  if (dualWieldTalentActive) traits.push('TALENT_CHAKRAM_FLOW_DUAL_ACTIVE');
 
   // v1.0 패시브 성장 보너스를 실제 전투 파생 능력치에 합산한다.
   if (isPlayer && pState?.skillProgression?.passiveProgress) {
@@ -580,8 +595,7 @@ function appendStatusTickLogs(
 
 function checkAndTriggerRevival(actor: BattleActor, turn: number, logs: BattleLogEntry[]): void {
   if (actor.hp > 0) return;
-  const canRevive = actor.traits.some((trait) => trait.includes('revive') || trait.includes('RESURRECTION'));
-  if (!canRevive) return;
+  if (!hasTrait(actor, 'revive_once')) return;
   if (actor.consumedBattleEffects?.includes('revive_once')) return;
 
   const reviveAmount = Math.max(1, Math.round(actor.maxHp * 0.4));
@@ -590,12 +604,41 @@ function checkAndTriggerRevival(actor: BattleActor, turn: number, logs: BattleLo
   logs.push(makeLog(
     actor,
     turn,
-    `${actor.name}이(가) 쓰러지는 순간 부활 효과가 발동해 다시 일어섰다.`,
+    `${actor.name}이(가) 쓰러지는 순간 장비의 부활 효과가 발동해 다시 일어섰다.`,
     { text: `부활 · HP +${reviveAmount}`, type: 'heal' }
   ));
 }
 
+function triggerResurrectionLightForSide(side: BattleActor[], turn: number, logs: BattleLogEntry[]): void {
+  const fallen = side.filter((actor) => actor.hp <= 0);
+  if (!fallen.length) return;
+
+  const saviors = side.filter((actor) => hasTrait(actor, 'TALENT_RESURRECTION_LIGHT') && !(actor.consumedBattleEffects || []).includes('talent_resurrection_light'));
+  for (const savior of saviors) {
+    const remainingFallen = side.filter((actor) => actor.hp <= 0);
+    if (!remainingFallen.length) break;
+    // 시전자 자신이 쓰러졌다면 자기 부활을 우선하며, 살아 있다면 아군 전투불능자를 구한다.
+    const target = savior.hp <= 0 ? savior : remainingFallen[0];
+    const reviveAmount = Math.max(1, Math.round(target.maxHp * 0.4));
+    target.hp = reviveAmount;
+    target.statusEffects = [];
+    target.isStaggered = false;
+    target.stagger = 0;
+    savior.consumedBattleEffects = [...(savior.consumedBattleEffects || []), 'talent_resurrection_light'];
+    logs.push(makeLog(
+      savior,
+      turn,
+      `${savior.name}의 부활의 성광이 ${target.name}을(를) 되살리고 모든 상태이상을 정화했다.`,
+      { text: `부활 · HP ${reviveAmount} · 상태 정화`, type: 'heal' }
+    ));
+  }
+}
+
 function checkAllRevivals(state: BattleState, logs: BattleLogEntry[]): void {
+  const party = [state.player, ...state.companions];
+  triggerResurrectionLightForSide(party, state.turn, logs);
+  triggerResurrectionLightForSide(state.enemies, state.turn, logs);
+  // 성광으로 구하지 못한 대상에 한해 개인 장비의 revive_once를 처리한다.
   for (const actor of getAllBattleActors(state)) checkAndTriggerRevival(actor, state.turn, logs);
 }
 
@@ -983,11 +1026,20 @@ export function planAutomaticAction(
   let skillId = 'basic_attack';
   let preferredTargetId: string | undefined;
 
+  let petCommandOutcome: PlannedCombatAction['petCommandOutcome'];
   if (actor.isCompanion) {
     const companionData = playerState.companions?.find((companion) => companion.id === actor.id);
-    const decision = chooseCompanionSkill(actor, companionData, battleState);
-    skillId = decision.skillId;
-    preferredTargetId = decision.targetId;
+    let decisionData = companionData;
+    if (companionData?.kind === 'PET' && companionData.petState) {
+      petCommandOutcome = rollPetCommandOutcome(companionData);
+      if (petCommandOutcome === 'INDEPENDENT') decisionData = { ...companionData, combatTactic: 'AGGRESSIVE' };
+      if (petCommandOutcome === 'FAIL') { skillId = 'defend_stance'; preferredTargetId = actor.id; }
+    }
+    if (petCommandOutcome !== 'FAIL') {
+      const decision = chooseCompanionSkill(actor, decisionData, battleState);
+      skillId = decision.skillId;
+      preferredTargetId = decision.targetId;
+    }
   } else {
     const livingParty = [battleState.player, ...battleState.companions].filter((member) => member.hp > 0);
     const taunting = livingParty.find((member) => member.statusEffects.some((effect) => effect.type === 'TAUNT'));
@@ -1010,6 +1062,7 @@ export function planAutomaticAction(
     targetIds: targets.map((target) => target.id),
     primaryTargetId: targets[0]?.id,
     actionDelay: getSkillActionDelay(skill, actor, targets[0], battleState),
+    petCommandOutcome,
   };
 }
 
@@ -1028,15 +1081,15 @@ function buildActionResult(
       logEntries: logs,
       isBattleEnded: true,
       outcome: 'VICTORY',
-      rewards: generateBattleRewards(state.enemies),
+      rewards: generateBattleRewards(state.enemies, false, state.player),
       consumedItem,
     };
   }
   if (terminal === 'DEFEAT') {
-    return { battleState: state, logEntries: logs, isBattleEnded: true, outcome: 'DEFEAT', rewards: generateBattleRewards(state.enemies, true), consumedItem };
+    return { battleState: state, logEntries: logs, isBattleEnded: true, outcome: 'DEFEAT', rewards: generateBattleRewards(state.enemies, true, state.player), consumedItem };
   }
   if (state.phase === 'ESCAPED') {
-    return { battleState: state, logEntries: logs, isBattleEnded: true, outcome: 'ESCAPED', rewards: generateBattleRewards(state.enemies, true), consumedItem };
+    return { battleState: state, logEntries: logs, isBattleEnded: true, outcome: 'ESCAPED', rewards: generateBattleRewards(state.enemies, true, state.player), consumedItem };
   }
   return { battleState: state, logEntries: logs, isBattleEnded: false, consumedItem };
 }
@@ -1108,13 +1161,21 @@ export function processAutomaticTurn(
     prepareNextActor(state, logs);
     return buildActionResult(state, logs);
   }
-  return processActorSkillTurn(
+  const result = processActorSkillTurn(
     battleState,
     plan.actorId,
     plan.skillId,
     plan.primaryTargetId,
     playerState
   );
+  if (plan.petCommandOutcome) {
+    const actor = getActorById(result.battleState, plan.actorId);
+    const label = plan.petCommandOutcome === 'OBEY' ? '명령 수행' : plan.petCommandOutcome === 'INDEPENDENT' ? '독자 행동' : '명령 실패';
+    const log = makeLog(actor, result.battleState.turn, `🐾 ${label}`, { text: label, type: plan.petCommandOutcome === 'OBEY' ? 'buff' : 'info' });
+    result.logEntries = [log, ...result.logEntries];
+    result.battleState.battleLog.push(log);
+  }
+  return result;
 }
 
 /**
@@ -1141,45 +1202,112 @@ export function processCombatItemTurn(
   const inventoryItem = playerState.inventory.find(
     (item) => item.id === itemNameOrId || item.name === itemNameOrId
   );
-  const itemDef = getItemDefinition(inventoryItem?.id || inventoryItem?.name || itemNameOrId);
-  if (!inventoryItem || inventoryItem.quantity <= 0 || !itemDef || !itemDef.usable || itemDef.category !== 'CONSUMABLE') {
+  const lookupKey = inventoryItem?.id || inventoryItem?.name || itemNameOrId;
+  const itemDef = getItemDefinition(lookupKey);
+  const potionDef = POTION_DATABASE[lookupKey] || Object.values(POTION_DATABASE).find((potion) => potion.name === (inventoryItem?.name || itemNameOrId));
+  if (!inventoryItem || inventoryItem.quantity <= 0 || !itemDef || !itemDef.usable || itemDef.category !== 'CONSUMABLE' || potionDef?.usableContext === 'NON_COMBAT_ONLY') {
     logs.push(makeLog(actor, state.turn, `[${inventoryItem?.name || itemNameOrId}]은(는) 전투 중 사용할 수 없습니다.`, { text: '사용 불가', type: 'info' }));
     return buildActionResult(state, logs);
   }
 
   const target = getActorById(state, targetActorId);
-  if (!target || target.hp <= 0) {
+  const potionEffect = potionDef?.gameplayEffect;
+  const canResurrect = !!potionEffect?.resurrectRatio;
+  if (!target || (target.hp <= 0 && !canResurrect)) {
     logs.push(makeLog(actor, state.turn, '아이템을 적용할 유효한 대상을 선택해야 합니다.', { text: '대상 필요', type: 'info' }));
     return buildActionResult(state, logs);
   }
+  if (canResurrect && target.hp > 0) {
+    logs.push(makeLog(actor, state.turn, `[${itemDef.name}]은(는) 전투불능 대상에게만 사용할 수 있습니다.`, { text: '대상 오류', type: 'info' }));
+    return buildActionResult(state, logs);
+  }
 
-  const effect = itemDef.useEffect || {};
+  const effect = potionEffect || itemDef.useEffect || {};
+  const duration = Math.max(1, Number(potionEffect?.durationTurns ?? potionDef?.durationTurns ?? 1));
   const beforeHp = target.hp;
   const beforeMp = target.mp;
   const beforeSanity = target.sanity;
+  const changes: string[] = [];
 
-  if (effect.hpDelta) target.hp = Math.max(0, Math.min(target.maxHp, target.hp + effect.hpDelta));
-  if (effect.mpDelta) target.mp = Math.max(0, Math.min(target.maxMp, target.mp + effect.mpDelta));
-  if (effect.sanityDelta && typeof target.sanity === 'number') {
-    target.sanity = Math.max(0, Math.min(target.maxSanity ?? 100, target.sanity + effect.sanityDelta));
+  if (potionEffect?.resurrectRatio && target.hp <= 0) {
+    target.hp = Math.max(1, Math.round(target.maxHp * potionEffect.resurrectRatio));
+    target.isStaggered = false;
+    target.stagger = 0;
+    changes.push(`부활 · HP ${target.hp}`);
+  } else {
+    const hpDelta = Number((potionEffect as any)?.hpDelta ?? (itemDef.useEffect?.hpDelta || 0));
+    const hpPercent = Number((potionEffect as any)?.hpPercent || 0);
+    const mpDelta = Number((potionEffect as any)?.mpDelta ?? (itemDef.useEffect?.mpDelta || 0));
+    const sanityDelta = Number((potionEffect as any)?.sanityDelta ?? (itemDef.useEffect?.sanityDelta || 0));
+    if (hpDelta || hpPercent) target.hp = Math.max(0, Math.min(target.maxHp, target.hp + hpDelta + Math.round(target.maxHp * hpPercent / 100)));
+    if (mpDelta) target.mp = Math.max(0, Math.min(target.maxMp, target.mp + mpDelta));
+    if (sanityDelta && typeof target.sanity === 'number') {
+      target.sanity = Math.max(0, Math.min(target.maxSanity ?? 100, target.sanity + sanityDelta));
+    }
   }
 
-  const changes: string[] = [];
-  if (target.hp !== beforeHp) changes.push(`HP ${target.hp - beforeHp >= 0 ? '+' : ''}${target.hp - beforeHp}`);
+  const addItemStatus = (type: import('./combatTypes').StatusEffectType, name: string, turns: number, value?: number) => {
+    target.statusEffects = target.statusEffects.filter((status) => status.type !== type);
+    target.statusEffects.push({
+      id: `item_${type.toLowerCase()}_${Date.now()}_${target.id}`,
+      type,
+      name,
+      duration: Math.max(1, turns),
+      value,
+      sourceActorId: actor.id,
+      skipNextDurationTick: actor.id === target.id,
+    });
+  };
+
+  if (potionEffect) {
+    if (potionEffect.cleanseDebuffs) {
+      const harmful = new Set(['BLEED','POISON','BURN','STUN','CHARM','FEAR','ACCURACY_DOWN','BLIND','SLOW','WEAKEN','VULNERABLE']);
+      const removed = target.statusEffects.filter((status) => harmful.has(status.type)).length;
+      target.statusEffects = target.statusEffects.filter((status) => !harmful.has(status.type));
+      changes.push(`해로운 상태 ${removed}개 정화`);
+    }
+    if (potionEffect.detoxPoison) {
+      target.statusEffects = target.statusEffects.filter((status) => status.type !== 'POISON');
+      if (duration > 1) addItemStatus('POISON_IMMUNE', '해독 비약 · 중독 면역', duration, 1);
+      changes.push(duration > 1 ? `중독 해제 · ${duration}턴 면역` : '중독 해제');
+    }
+    const bonus = potionEffect.statBonus || {};
+    if (bonus.defense) addItemStatus('DEF_UP', '철벽 비약', duration, bonus.defense);
+    if (bonus.attack) { addItemStatus('ATK_UP', '광전 비약', duration, bonus.attack); addItemStatus('MAGIC_ATK_UP', '광전 비약', duration, bonus.attack); }
+    if (bonus.speed) addItemStatus('SPEED_UP', '신속 비약', duration, bonus.speed);
+    if (bonus.accuracy) addItemStatus('ACCURACY_UP', '명중 비약', duration, bonus.accuracy);
+    if (bonus.evasion) addItemStatus('EVASION_UP', '회피 비약', duration, bonus.evasion);
+    if (bonus.critRate) addItemStatus('CRIT_UP', '치명 비약', duration, bonus.critRate);
+    if (bonus.critDamage) addItemStatus('CRIT_DAMAGE_UP', '치명 비약 · 치명 피해', duration, bonus.critDamage);
+    if (bonus.fireResist) addItemStatus('FIRE_RES_UP', '내화 비약', duration, bonus.fireResist);
+    if (bonus.frostResist) addItemStatus('ICE_RES_UP', '내한 비약', duration, bonus.frostResist);
+    if (bonus.lightningResist) addItemStatus('LIGHTNING_RES_UP', '절연 비약', duration, bonus.lightningResist);
+    if (bonus.barrier) {
+      target.statusEffects.push({ id:`item_shield_${Date.now()}_${target.id}`, type:'SHIELD', name:'마력장 비약', duration, value:bonus.barrier, sourceActorId:actor.id, skipNextDurationTick:actor.id===target.id });
+    }
+    if (bonus.regenHpPerTurn) addItemStatus('REGENERATION', '재생 비약', duration, bonus.regenHpPerTurn);
+    if (bonus.undyingWill) addItemStatus('UNDYING', '불굴 비약', duration, Math.max(1, bonus.undyingWill));
+  }
+
+  if (target.hp !== beforeHp && !canResurrect) changes.push(`HP ${target.hp - beforeHp >= 0 ? '+' : ''}${target.hp - beforeHp}`);
   if (target.mp !== beforeMp) changes.push(`MP ${target.mp - beforeMp >= 0 ? '+' : ''}${target.mp - beforeMp}`);
   if (typeof beforeSanity === 'number' && target.sanity !== beforeSanity) {
     const delta = (target.sanity ?? 0) - beforeSanity;
     changes.push(`정신력 ${delta >= 0 ? '+' : ''}${delta}`);
   }
-  if (effect.buffName) changes.push(effect.buffName);
+  if (itemDef.useEffect?.buffName) changes.push(itemDef.useEffect.buffName);
+  if (potionEffect?.statBonus) {
+    const label = potionDef?.effectLogText || potionDef?.description;
+    if (label) changes.push(label.replace(/^\[.*?\]\s*/, ''));
+  }
 
   const selfUse = actor.id === target.id;
   logs.push(makeLog(
     actor,
     state.turn,
-    selfUse
-      ? `${actor.name}(이)가 [${itemDef.name}]을(를) 사용했다.${effect.message ? ` ${effect.message}` : ''}`
-      : `${actor.name}(이)가 [${itemDef.name}]을(를) ${target.name}에게 던져 효과를 적용했다.`,
+    potionDef?.actionLogText || (selfUse
+      ? `${actor.name}(이)가 [${itemDef.name}]을(를) 사용했다.${itemDef.useEffect?.message ? ` ${itemDef.useEffect.message}` : ''}`
+      : `${actor.name}(이)가 [${itemDef.name}]을(를) ${target.name}에게 던져 효과를 적용했다.`),
     { text: changes.join(' · ') || '아이템 사용', type: (target.hp > beforeHp || (target.sanity ?? 0) > (beforeSanity ?? 0)) ? 'heal' : 'info' }
   ));
 
@@ -1234,7 +1362,7 @@ export function attemptEscape(
   return buildActionResult(state, logs);
 }
 
-export function generateBattleRewards(enemies: BattleActor[], defeatedOnly = false) {
+export function generateBattleRewards(enemies: BattleActor[], defeatedOnly = false, rewardActor?: BattleActor) {
   let totalExp = 0;
   let totalRupees = 0;
   const items: Array<{ name: string; quantity: number; id?: string; equipmentId?: string; description?: string; category?: 'MATERIAL' | 'EQUIPMENT' | 'CONSUMABLE' }> = [];
@@ -1255,6 +1383,12 @@ export function generateBattleRewards(enemies: BattleActor[], defeatedOnly = fal
     totalRupees += rupees;
     items.push(...loot);
     breakdown.push({ enemyId: monsterId, enemyName: enemy.name, exp, rupees, items: loot.map((item) => ({ name: item.name, quantity: item.quantity })) });
+  }
+
+  // 영혼 강탈: 전투에서 획득하는 루피 총량 +20%.
+  if (rewardActor && hasTrait(rewardActor, 'TALENT_SOUL_HARVEST')) {
+    totalRupees = Math.round(totalRupees * 1.2);
+    for (const row of breakdown) row.rupees = Math.round(row.rupees * 1.2);
   }
 
   const merged = new Map<string, typeof items[number]>();

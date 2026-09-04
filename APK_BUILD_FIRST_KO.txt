@@ -1,0 +1,32 @@
+판타지악 7.1 Android/APK 빌드용 전체본
+=====================================
+
+포함 사항
+- 7.1 런타임 수정본
+- CI/React 타입 보강 패치
+- 코드 기반 연령 정책 중앙화 패치: src/config/agePolicy.ts
+- Android 네이티브 셸: native/android
+- Android 로컬 AI 브리지/JNI/모델 관리 코드
+- llama.cpp 준비 스크립트
+
+연령 기준 변경
+- src/config/agePolicy.ts
+- ADULT_MIN_PHYSICAL_AGE = 18
+- 예: 20세부터 성인 판정 -> ADULT_MIN_PHYSICAL_AGE = 20
+- 인게임 설정이 아니라 코드 상수로만 관리됨
+
+Android Studio 빌드 순서
+1) 프로젝트 루트에서 npm install
+2) npm run build
+3) native/android/scripts/sync_web_assets.sh 실행
+4) native/android/scripts/prepare_llama_cpp.sh 실행
+5) Android Studio에서 native/android 폴더 열기
+6) Gradle Sync
+7) Build > Generate Signed App Bundle or APK > APK
+
+참고
+- Android 최소 API 28, arm64-v8a 기준.
+- GGUF 모델 파일은 ZIP에 포함하지 않음.
+- 기본 모델 위치는 앱 내부 files/models/qwen3-1.7b-q4_k_m.gguf.
+- 동일 앱 업데이트를 계속 설치하려면 서명키를 보존해야 함.
+- native/android/app/src/main/assets/www 는 npm run build 후 sync_web_assets.sh가 채움.

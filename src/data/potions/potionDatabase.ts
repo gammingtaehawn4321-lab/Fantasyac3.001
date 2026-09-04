@@ -366,7 +366,7 @@ export const POTION_DATABASE: Record<string, PotionDefinition> = {
     name: '부활의 비약',
     category: 'ELIXIR',
     categoryLabel: '전투 비약',
-    description: '전투 중 패배 또는 사망 순간 인벤토리에 지니고 있으면 체력 50%를 회복하며 즉시 생환 부활합니다.',
+    description: '일반 전투 패배로 사망 처리될 때 사용할 수 있는 전설 비약. 해당 전투를 포기한 채 체력 50%로 생환합니다. 엘리트·보스 전투 건너뛰기에는 사용할 수 없습니다.',
     rarity: 'LEGENDARY',
     ingredients: [{ itemName: '성석', quantity: 1 }, { itemName: '월광화', quantity: 2 }, { itemName: '에테르 결정', quantity: 2 }],
     requiredAlchemyLevel: 18,

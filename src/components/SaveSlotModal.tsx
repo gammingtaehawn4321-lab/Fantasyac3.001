@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { X, Save, FolderOpen, Edit3, Trash2, AlertTriangle, Check, RotateCcw, Clock, MapPin, Calendar, Shield } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { X, Save, FolderOpen, Edit3, Trash2, AlertTriangle, Check, RotateCcw, Clock, MapPin, Calendar, Shield, Download, Upload } from 'lucide-react';
 import {
   SlotId,
   SaveSlot,
@@ -10,6 +10,9 @@ import {
   renameSaveSlot,
   migrateSaveData,
   GameSaveData,
+  createSaveBackupBundle,
+  parseSaveBackupBundle,
+  restoreSaveBackupBundle,
 } from '../services/saveService';
 
 interface SaveSlotModalProps {
@@ -46,6 +49,7 @@ export function SaveSlotModal({
 
   const [renamingSlotId, setRenamingSlotId] = useState<SlotId | null>(null);
   const [renameInput, setRenameInput] = useState('');
+  const backupInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadAllSlots = async () => {
     setIsLoading(true);
@@ -136,6 +140,47 @@ export function SaveSlotModal({
       console.error(`Failed renaming slot ${slotId}:`, err);
       onShowToast('이름을 변경하지 못했습니다.', 'error');
     } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleExportBackup = async () => {
+    try {
+      setIsLoading(true);
+      const bundle = await createSaveBackupBundle();
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      a.download = `fantasyac_save_backup_${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      onShowToast(`세이브 ${bundle.slots.length}개를 백업 파일로 내보냈습니다.`, 'success');
+    } catch (err) {
+      console.error('Failed exporting save backup:', err);
+      onShowToast('세이브 백업 파일을 만들지 못했습니다.', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleImportBackupFile = async (file: File | null) => {
+    if (!file) return;
+    try {
+      setIsLoading(true);
+      const raw = await file.text();
+      const bundle = parseSaveBackupBundle(raw);
+      const restored = await restoreSaveBackupBundle(bundle);
+      await loadAllSlots();
+      onShowToast(`백업에서 세이브 ${restored}개를 복원했습니다.`, 'success');
+    } catch (err) {
+      console.error('Failed importing save backup:', err);
+      onShowToast('세이브 백업을 가져오지 못했습니다. 파일 형식을 확인해 주세요.', 'error');
+    } finally {
+      if (backupInputRef.current) backupInputRef.current.value = '';
       setIsLoading(false);
     }
   };
@@ -398,14 +443,40 @@ export function SaveSlotModal({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-5 py-3 border-t border-stone-800 bg-stone-950 flex items-center justify-between text-xs text-stone-400">
-          <span>데이터는 현재 브라우저(IndexedDB)에 영구 저장됩니다.</span>
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold rounded transition-all cursor-pointer"
-          >
-            닫기
-          </button>
+        <div className="px-5 py-3 border-t border-stone-800 bg-stone-950 flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between text-xs text-stone-400">
+          <div className="flex flex-col gap-1">
+            <span>같은 설치본을 업데이트하면 IndexedDB 세이브는 유지됩니다.</span>
+            <span className="text-stone-500">기기 이동/재설치 전에는 백업 파일을 내보내 두는 것을 권장합니다.</span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              ref={backupInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => handleImportBackupFile(e.target.files?.[0] || null)}
+            />
+            <button
+              onClick={handleExportBackup}
+              disabled={isLoading}
+              className="flex items-center gap-1 px-3 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold rounded transition-all cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" /> 전체 백업
+            </button>
+            <button
+              onClick={() => backupInputRef.current?.click()}
+              disabled={isLoading}
+              className="flex items-center gap-1 px-3 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold rounded transition-all cursor-pointer"
+            >
+              <Upload className="w-3.5 h-3.5" /> 백업 가져오기
+            </button>
+            <button
+              onClick={onClose}
+              className="px-4 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold rounded transition-all cursor-pointer"
+            >
+              닫기
+            </button>
+          </div>
         </div>
       </div>
     </div>

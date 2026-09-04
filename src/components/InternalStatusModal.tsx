@@ -10,19 +10,18 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
-import { PlayerState, BodyCompartmentId, BodyLoadStage, BodyPayloadChannel, BodyPayloadKind, BodyPayloadEntry } from '../types';
+import { PlayerState, BodyCompartmentId, BodyLoadStage, BodyPayloadKind, BodyPayloadEntry } from '../types';
 import {
   BODY_COMPARTMENT_CAPACITY,
   BODY_STATUS_VISUALS,
   BLADDER_STATUS_VISUAL,
 } from '../data/bodySystemConfig';
 import {
-  BODY_PAYLOAD_DISPLAY_META,
   getBodyIllustrationSlot,
-  getBodyPayloadChannelMeta,
+  getBodyPayloadKindMeta,
   getBodyPayloadSourceDisplayName,
 } from '../data/bodyPayloadPresentation';
-import { resolveBodyPayloadChannel } from '../data/bodyPayloadUserDefinitions';
+import { BODY_PAYLOAD_KINDS } from '../data/bodyPayloadUserDefinitions';
 import { getBodyLoadStage } from '../gameEngine';
 
 interface InternalStatusModalProps {
@@ -46,11 +45,6 @@ const STAGE_LABELS: Record<BodyLoadStage, string> = {
   SATURATED: '포화',
 };
 
-const PAYLOAD_CHANNEL_ICONS: Record<BodyPayloadChannel, React.ComponentType<{ className?: string }>> = {
-  A: Droplets,
-  B: CircleDot,
-  C: Bug,
-};
 
 const PAYLOAD_KIND_ICONS: Partial<Record<BodyPayloadKind, React.ComponentType<{ className?: string }>>> = {
   STANDARD_FLUID: Droplets,
@@ -115,13 +109,16 @@ const pregnancyLabel = (stage?: string) => {
 const parasiteModeLabel = (mode?: string) => mode === 'INSERTED' ? '기생 삽입형' : '내부 기생형';
 const parasiteStageLabel = (stage?: string) => {
   switch (stage) {
-    case 'DORMANT': return '휴면';
-    case 'DEVELOPING': return '성장 중';
+    case 'HATCHLING': return '부화 직후';
+    case 'JUVENILE': return '성장 중';
     case 'MATURE': return '성숙';
     case 'RESOLVING': return '변화 중';
     default: return '미확인';
   }
 };
+const parasiteRouteLabel = (route?: string) => route === 'ANAL' ? '항문 기원' : route === 'VAGINAL' ? '질 기원' : '기원 미상';
+const eggTypeLabel = (eggType?: string) => eggType === 'TENTACLE_EGG' ? '촉수 알' : '곤충 알';
+const eggStageLabel = (stage?: string) => stage === 'ACTIVE' ? '활성' : stage === 'DEVELOPING' ? '성장 중' : stage === 'HATCH_READY' ? '부화 직전' : '휴면';
 
 export function InternalStatusModal({ isOpen, onClose, playerState }: InternalStatusModalProps) {
   const [showEmpty, setShowEmpty] = useState(false);
@@ -140,6 +137,7 @@ export function InternalStatusModal({ isOpen, onClose, playerState }: InternalSt
   if (!isOpen) return null;
 
   const pregnancy = playerState.pregnancy;
+  const eggs = playerState.eggCohorts ?? [];
   const parasites = playerState.parasiteStates ?? [];
   const bladder = playerState.bladderStatus;
 
@@ -162,8 +160,8 @@ export function InternalStatusModal({ isOpen, onClose, playerState }: InternalSt
         </header>
 
         <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-4 custom-scrollbar">
-          {(pregnancy?.active || parasites.length > 0) && (
-            <section className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {(pregnancy?.active || eggs.length > 0 || parasites.length > 0) && (
+            <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
               {pregnancy?.active && (
                 <div className="rounded-xl bg-stone-900/55 border border-stone-800 p-3.5 space-y-2.5">
                   <div className="flex items-center gap-2 text-sm font-semibold text-stone-200">
@@ -187,6 +185,26 @@ export function InternalStatusModal({ isOpen, onClose, playerState }: InternalSt
                 </div>
               )}
 
+              {eggs.length > 0 && (
+                <div className="rounded-xl bg-stone-900/55 border border-stone-800 p-3.5 space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-stone-200">
+                    <CircleDot className="w-4 h-4 text-amber-300" /> 알 상태
+                    <span className="ml-auto text-[10px] text-stone-500 font-mono">{eggs.reduce((sum, egg) => sum + egg.count, 0)}개</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {eggs.slice(0, 6).map((egg) => (
+                      <div key={egg.id} className="rounded-lg bg-stone-950/70 border border-stone-800/70 px-2.5 py-2 text-[10px]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-stone-300 font-medium">{eggTypeLabel(egg.eggType)} · {egg.count}개</span>
+                          <span className="text-stone-500">{BODY_STATUS_VISUALS[egg.compartmentId]?.label}</span>
+                        </div>
+                        <div className="text-stone-500 mt-0.5">{eggStageLabel(egg.stage)} · 부화 진행 {Math.min(100, Math.round((egg.elapsedActiveMinutes / Math.max(1, egg.incubationMinutes)) * 100))}%</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {parasites.length > 0 && (
                 <div className="rounded-xl bg-stone-900/55 border border-stone-800 p-3.5 space-y-2">
                   <div className="flex items-center gap-2 text-sm font-semibold text-stone-200">
@@ -198,9 +216,9 @@ export function InternalStatusModal({ isOpen, onClose, playerState }: InternalSt
                       <div key={parasite.id} className="flex items-center justify-between gap-2 rounded-lg bg-stone-950/70 border border-stone-800/70 px-2.5 py-2 text-[10px]">
                         <div className="min-w-0">
                           <div className="text-stone-300 font-medium truncate">{parasiteModeLabel(parasite.mode)} · {parasite.speciesId}</div>
-                          <div className="text-stone-500">{parasiteStageLabel(parasite.stage)} · 수량 {parasite.count}</div>
+                          <div className="text-stone-500">{parasiteStageLabel(parasite.stage)} · {parasiteRouteLabel(parasite.originRoute)} · 수량 {parasite.count}</div>
                         </div>
-                        <span className="text-stone-500 shrink-0">{parasite.compartmentId ? BODY_STATUS_VISUALS[parasite.compartmentId]?.label || '미지정 부위' : '내부'}</span>
+                        <span className="text-stone-500 shrink-0">{parasite.mode === 'INTERNAL' ? '내부' : '삽입형'}</span>
                       </div>
                     ))}
                   </div>
@@ -213,7 +231,7 @@ export function InternalStatusModal({ isOpen, onClose, playerState }: InternalSt
             <div className="flex items-center justify-between mb-2.5">
               <div>
                 <h3 className="text-xs font-semibold text-stone-200">구획별 상태</h3>
-                <p className="text-[10px] text-stone-500 mt-0.5">컴포넌트 1·2는 5단계 × 사용자 정의 내용물 3종의 전용 삽화 슬롯을 사용합니다.</p>
+                <p className="text-[10px] text-stone-500 mt-0.5">컴포넌트 1·2는 5단계 × 실제 내용물 5종의 전용 삽화 슬롯을 사용합니다.</p>
               </div>
               <button
                 onClick={() => setShowEmpty((v) => !v)}
@@ -231,35 +249,22 @@ export function InternalStatusModal({ isOpen, onClose, playerState }: InternalSt
                 const imageSrc = illustrationSlot?.imageSrc || visual.imageSrc;
                 const imageAlt = illustrationSlot?.imageAlt || visual.imageAlt || visual.label || '상태 이미지';
 
-                const groupedEntries = (compartmentId === 'COMPARTMENT_1' || compartmentId === 'COMPARTMENT_2')
-                  ? (['A', 'B', 'C'] as BodyPayloadChannel[]).map((channel) => {
-                      const sources = entries.filter(
-                        (entry) => resolveBodyPayloadChannel(entry.payloadKind, entry.payloadChannel) === channel,
-                      );
-                      const amount = sources.reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
-                      const meta = getBodyPayloadChannelMeta(channel);
-                      return {
-                        key: `channel-${channel}`,
-                        amount,
-                        amountLabel: meta.amountLabel,
-                        unit: meta.unit,
-                        Icon: PAYLOAD_CHANNEL_ICONS[channel],
-                        sources: groupSourcesForDisplay(sources),
-                      };
-                    })
-                  : (Object.keys(BODY_PAYLOAD_DISPLAY_META) as BodyPayloadKind[]).map((kind) => {
-                      const sources = entries.filter((entry) => entry.payloadKind === kind);
-                      const amount = sources.reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
-                      const meta = BODY_PAYLOAD_DISPLAY_META[kind];
-                      return {
-                        key: `kind-${kind}`,
-                        amount,
-                        amountLabel: meta.amountLabel,
-                        unit: meta.unit,
-                        Icon: PAYLOAD_KIND_ICONS[kind] || CircleDot,
-                        sources: groupSourcesForDisplay(sources),
-                      };
-                    });
+                const groupedEntries = BODY_PAYLOAD_KINDS.map((kind) => {
+                  const sources = entries.filter((entry) => entry.payloadKind === kind);
+                  const amount = sources.reduce(
+                    (sum, entry) => sum + Math.max(0, Number(entry.amount) || 0),
+                    0,
+                  );
+                  const meta = getBodyPayloadKindMeta(kind);
+                  return {
+                    key: `kind-${kind}`,
+                    amount,
+                    amountLabel: meta.amountLabel,
+                    unit: meta.unit,
+                    Icon: PAYLOAD_KIND_ICONS[kind] || CircleDot,
+                    sources: groupSourcesForDisplay(sources),
+                  };
+                });
                 const visibleEntries = showEmpty
                   ? groupedEntries
                   : groupedEntries.filter((entry) => entry.amount > 0);

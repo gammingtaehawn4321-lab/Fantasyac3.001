@@ -140,7 +140,7 @@ export const CAMP_FACILITIES_DATABASE: Record<CampFacilityType, CampFacilityDefi
     upgradeCosts: {
       1: { ingredients: [{ itemName: '빛나는 마나석 파편', quantity: 2 }, { itemName: '맑은 이슬', quantity: 3 }] },
       2: { ingredients: [{ itemName: '빛나는 마나석 파편', quantity: 4 }, { itemName: '순은 주괴', quantity: 2 }] },
-      3: { ingredients: [{ itemName: '심연의 정수', quantity: 2 }, { itemName: '영혼석 조각', quantity: 2 }] },
+      3: { ingredients: [{ itemName: '심연의 정수', quantity: 2 }, { itemName: '빛나는 마나석 파편', quantity: 2 }] },
     },
     benefits: ['연금술 고급 포션 레시피 해금', '포션 제작 시 추가 획득 확률'],
   },

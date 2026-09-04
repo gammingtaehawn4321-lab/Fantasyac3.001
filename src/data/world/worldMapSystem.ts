@@ -7,6 +7,8 @@ import { UNDERGROUND_ENTRANCES, UNDERGROUND_LAYER_BOSSES } from './undergroundDe
 import { WORLD_DUNGEONS } from '../dungeons/dungeonSystem';
 import { calculateSurfaceTravelRange, airshipFuelCostForDistance } from './lifeTravelSystem';
 import { WAYSTATIONS, getWaystationAt } from './waystationSystem';
+import { HOSTILE_SITE_DEFINITIONS, getEnabledHostileSiteDefinitions, type HostileSiteDefinition } from './hostileSiteDefinitions';
+import { PHEROMONE_CONFIG, getEffectivePheromoneStrength, pheromoneMonsterWeightMultiplier } from '../pheromoneSystem';
 
 export type MapStructureType = 'CITY' | 'VILLAGE' | 'SHRINE' | 'OUTPOST' | 'PORT' | 'WAYSTATION';
 export type MapFeatureType = 'MINE' | 'CANYON' | 'SINKHOLE' | 'DUNGEON_RESERVED' | 'DUNGEON' | 'ORE_VEIN' | 'LAYER_BOSS' | 'HELL_GATE' | 'RESOURCE' | 'ENEMY_OUTPOST' | 'RUIN';
@@ -430,6 +432,68 @@ function buildWorldMap(): Record<string, WorldHexTile> {
 
 export const WORLD_HEX_TILES = buildWorldMap();
 export const WORLD_HEX_TILE_LIST = Object.values(WORLD_HEX_TILES);
+export interface HostileSitePlacement {
+  siteId: string;
+  hexId: string;
+  definition: HostileSiteDefinition;
+}
+
+function stringHash(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i += 1) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+
+function buildHostileSitePlacements(): Record<string, HostileSitePlacement> {
+  const candidates = WORLD_HEX_TILE_LIST.filter((tile) =>
+    tile.layer === 'SURFACE'
+    && (tile.terrain === 'PLAINS' || tile.terrain === 'FOREST')
+    && !tile.structureType
+    && !tile.featureType
+    && !tile.locationTag
+  );
+  const occupied = new Set<string>();
+  const byHex: Record<string, HostileSitePlacement> = {};
+  for (const definition of getEnabledHostileSiteDefinitions()) {
+    const eligible = candidates.filter((tile) => definition.allowedTerrains.includes(tile.terrain) && !occupied.has(tile.id));
+    if (!eligible.length) continue;
+    const index = stringHash(definition.id) % eligible.length;
+    const tile = eligible[index];
+    occupied.add(tile.id);
+    byHex[tile.id] = { siteId: definition.id, hexId: tile.id, definition };
+  }
+  return byHex;
+}
+
+export const HOSTILE_SITE_PLACEMENTS_BY_HEX = buildHostileSitePlacements();
+
+export function getHostileSiteAtHex(tileIdValue?: string | null, state?: Pick<PlayerState, 'worldMap'>): (HostileSitePlacement & { status: 'HIDDEN' | 'ACTIVE' | 'CLEARED' }) | undefined {
+  if (!tileIdValue) return undefined;
+  const placement = HOSTILE_SITE_PLACEMENTS_BY_HEX[tileIdValue];
+  if (!placement) return undefined;
+  const stored = state?.worldMap?.hostileSiteStates?.[placement.siteId];
+  const status = stored === 'CLEARED' ? 'CLEARED' : stored === 'HIDDEN' ? 'HIDDEN' : 'ACTIVE';
+  return { ...placement, status };
+}
+
+export function setHostileSiteStatus(
+  state: PlayerState,
+  siteId: string,
+  status: 'HIDDEN' | 'ACTIVE' | 'CLEARED',
+): PlayerState {
+  if (!siteId || !Object.values(HOSTILE_SITE_PLACEMENTS_BY_HEX).some((placement) => placement.siteId === siteId)) return state;
+  return {
+    ...state,
+    worldMap: {
+      ...state.worldMap,
+      hostileSiteStates: {
+        ...(state.worldMap.hostileSiteStates || {}),
+        [siteId]: status,
+      },
+    },
+  };
+}
+
 const ABELLA_CANDIDATES = WORLD_HEX_TILE_LIST.filter((t)=>t.layer==='CELESTIAL'&&Math.abs(t.q)<=9&&Math.abs(t.r)<=6&&t.locationTag!=='EDOWA_APPROACH');
 
 export function findHexByLocationTag(tag: string): WorldHexTile | undefined {return WORLD_HEX_TILE_LIST.find((tile)=>tile.locationTag===tag);}
@@ -473,9 +537,10 @@ export function getEffectiveNavigationTools(state: PlayerState) {
 }
 export function canEnterHex(state: PlayerState, tile: WorldHexTile): { ok:boolean; reason?:string } {
   const flags=new Set(state.worldMap?.accessFlags||[]);const nav=getEffectiveNavigationTools(state);const airship=state.airship;
+  const hasPotion=(id:string)=>Boolean(state.activePotionEffects?.some((effect)=>effect.statusEffectId===id&&effect.remainingMinutes>0));
   if(tile.layer==='HELL') return {ok:false,reason:'지옥층은 아직 미구현입니다.'};
   if(tile.layer==='DEEP_UNDERGROUND'&&tile.requiredAccessFlag&&!flags.has(tile.requiredAccessFlag)) return {ok:false,reason:'이 지역의 지하층 보스를 처치해야 심층으로 내려갈 수 있습니다.'};
-  if ((tile.layer==='UNDERWATER'||tile.layer==='DEEP_SEA') && state.race!=='MERFOLK' && !flags.has('UNDERWATER_ACCESS')) return {ok:false,reason:'수중 이동 능력 또는 장비가 필요합니다.'};
+  if ((tile.layer==='UNDERWATER'||tile.layer==='DEEP_SEA') && state.race!=='MERFOLK' && !flags.has('UNDERWATER_ACCESS') && !hasPotion('status_potion_water_breathing')) return {ok:false,reason:'수중 이동 능력 또는 장비가 필요합니다.'};
   if (tile.layer==='SKY') {
     const dragonFlight=state.race==='DRAGONKIN';const native=dragonFlight||flags.has('SKY_NATIVE_ACCESS')||state.beastkinType==='BIRD';const equipped=hasFullTools(nav.sky);const discovered=(state.worldMap?.discoveredHexIds||[]).includes(tile.id);const prostiNaturalGate=tile.locationTag==='PROSTI_SKY_GATE';const transport=Boolean(airship?.built)||flags.has('SKY_MAGIC_ACCESS')||prostiNaturalGate||native;
     if(!transport)return{ok:false,reason:'하늘 진입에는 직접 제작한 비행정, 비행 마법, 새 수인 비행 능력 또는 프로스티 정상 진입로가 필요합니다.'};
@@ -506,14 +571,17 @@ export function calculateStepMinutes(state:PlayerState,tile:WorldHexTile):number
 export function rollTravelStep(state:PlayerState,tile:WorldHexTile,seed:number):TravelStepResult {
   const minutes=calculateStepMinutes(state,tile);const sectorId=getEffectiveSectorId(tile,state.dayCount);const flags=new Set(state.worldMap?.accessFlags||[]);
   if(tile.layerBossId&&tile.layerBossClearFlag&&!flags.has(tile.layerBossClearFlag)){const boss=getRegionalMonsterDefinition(tile.layerBossId);return{tileId:tile.id,minutes,sectorId,encounterType:'MONSTER',monsterId:tile.layerBossId,monsterName:boss?.name||tile.featureName||'층 수문장',eventText:`[층 보스] ${boss?.name||tile.featureName||'수문장'}이 다음 층으로 향하는 길을 막고 있다.`};}
-  const profile=getSectorEncounterProfile(sectorId);const roll=hash01(tile.q+seed,tile.r+state.dayCount,31);const eventChance=Math.min(.58,Math.max(.04,.10+tile.dangerLevel*.045+(profile?.eventChanceModifier||0)));if(roll>=eventChance)return{tileId:tile.id,minutes,sectorId,encounterType:'NONE'};
+  const profile=getSectorEncounterProfile(sectorId);
+  const insectPheromone=getEffectivePheromoneStrength(state,'INSECTOID');const tentaclePheromone=getEffectivePheromoneStrength(state,'TENTACLE');const pheromonePressure=Math.min(1,insectPheromone+tentaclePheromone);
+  const roll=hash01(tile.q+seed,tile.r+state.dayCount,31);let eventChance=Math.min(.86,Math.max(.04,.10+tile.dangerLevel*.045+(profile?.eventChanceModifier||0)+PHEROMONE_CONFIG.eventChanceBonusAtFullStrength*pheromonePressure));if(state.activePotionEffects?.some((effect)=>effect.statusEffectId==='status_potion_scent_mask'&&effect.remainingMinutes>0)) eventChance=Math.max(.02,eventChance*.6);if(roll>=eventChance)return{tileId:tile.id,minutes,sectorId,encounterType:'NONE'};
   let monsterPool=getRegionalMonsterPool(tile.regionId,tile.layer,tile.terrain,state.level,sectorId);
-  const chooseMonster=monsterPool.length>0&&hash01(tile.q,tile.r,seed+40)<(profile?.monsterShare??.58);if(chooseMonster){
-    // 지하/심층의 야외 동굴에서는 곤충류가 가장 흔한 생태군이 되도록 조우 가중치를 높인다.
-    const weighted=(m:(typeof monsterPool)[number])=>m.encounterWeight*((tile.layer==='UNDERGROUND'||tile.layer==='DEEP_UNDERGROUND')&&m.raceSubtype==='INSECTOID'?2.6:1);
+  const monsterShare=Math.min(.95,(profile?.monsterShare??.58)+PHEROMONE_CONFIG.monsterShareBonusAtFullStrength*pheromonePressure);
+  const chooseMonster=monsterPool.length>0&&hash01(tile.q,tile.r,seed+40)<monsterShare;if(chooseMonster){
+    // 지하/심층 생태 가중치 + 페로몬 계통 가중치. 거점 내부의 고정 풀은 TravelSession에서 더 높은 우선순위로 처리한다.
+    const weighted=(m:(typeof monsterPool)[number])=>m.encounterWeight*((tile.layer==='UNDERGROUND'||tile.layer==='DEEP_UNDERGROUND')&&m.raceSubtype==='INSECTOID'?2.6:1)*(m.raceSubtype==='INSECTOID'?pheromoneMonsterWeightMultiplier(state,'INSECTOID'):m.raceSubtype==='TENTACLE'?pheromoneMonsterWeightMultiplier(state,'TENTACLE'):1);
     const total=monsterPool.reduce((s,m)=>s+weighted(m),0);let x=hash01(tile.q,tile.r,seed+41)*total;let picked=monsterPool[0];for(const m of monsterPool){x-=weighted(m);if(x<=0){picked=m;break;}}return{tileId:tile.id,minutes,sectorId,encounterType:'MONSTER',monsterId:picked.id,monsterName:picked.name,eventText:`[${profile?.name||tile.sectorName}] ${picked.name}와 조우했다.`};}
   if(profile?.events.length){const idx=Math.floor(hash01(tile.q,tile.r,seed+50)*profile.events.length)%profile.events.length;return{tileId:tile.id,minutes,sectorId,encounterType:'EVENT',eventText:`[${profile.name}] ${profile.events[idx]}`};}
   return{tileId:tile.id,minutes,sectorId,encounterType:'NONE'};
 }
-export function createInitialWorldMapState(startTag:string,storyFlags:string[]=[]):WorldMapState {const start=findHexByLocationTag(startTag)||findHexByLocationTag('THE_PELLESS_LOWER')!;const accessFlags=[...storyFlags];const initialNearby=[start.id,...getNeighborHexIds(start)];return{currentHexId:start.id,currentRegionId:start.regionId,currentLayer:start.layer,discoveredHexIds:Array.from(new Set(initialNearby)),exploredHexIds:[start.id],routePreference:'FASTEST',skyTools:{map:false,compass:false,telescope:false},celestialTools:{map:false,compass:false,telescope:false},accessFlags,lastSelectedHexId:start.id,discoveredWaystationIds:[],mapRevision:4};}
-export function revealAround(state:PlayerState,tileIdValue:string,radius=1):PlayerState {const origin=WORLD_HEX_TILES[tileIdValue];if(!origin)return state;const discovered=new Set(state.worldMap.discoveredHexIds||[]);discovered.add(origin.id);(origin.verticalLinks||[]).forEach((id)=>discovered.add(id));const nav=getEffectiveNavigationTools(state);const flags=new Set(state.worldMap?.accessFlags||[]);const dragonFlight=state.race==='DRAGONKIN';const skyLocal=origin.layer==='SKY'&&!hasFullTools(nav.sky)&&!dragonFlight&&!(flags.has('SKY_NATIVE_ACCESS')||state.beastkinType==='BIRD');const celestialLocal=origin.layer==='CELESTIAL'&&!hasFullTools(nav.celestial)&&!dragonFlight&&!(flags.has('CELESTIAL_NATIVE_ACCESS')&&state.beastkinType==='FOX');const effectiveRadius=(skyLocal||celestialLocal)?0:radius;Object.values(WORLD_HEX_TILES).forEach(tile=>{if(tile.layer===origin.layer&&axialDistance(tile,origin)<=effectiveRadius)discovered.add(tile.id);});const nearbyStations=WAYSTATIONS.filter(ws=>discovered.has(tileId('SURFACE',ws.q,ws.r))).map(ws=>ws.id);return{...state,worldMap:{...state.worldMap,discoveredHexIds:[...discovered],discoveredWaystationIds:Array.from(new Set([...(state.worldMap.discoveredWaystationIds||[]),...nearbyStations])),mapRevision:(state.worldMap.mapRevision||0)+1}};}
+export function createInitialWorldMapState(startTag:string,storyFlags:string[]=[]):WorldMapState {const start=findHexByLocationTag(startTag)||findHexByLocationTag('THE_PELLESS_LOWER')!;const accessFlags=[...storyFlags];const initialNearby=[start.id,...getNeighborHexIds(start)];return{currentHexId:start.id,currentRegionId:start.regionId,currentLayer:start.layer,discoveredHexIds:Array.from(new Set(initialNearby)),exploredHexIds:[start.id],routePreference:'FASTEST',skyTools:{map:false,compass:false,telescope:false},celestialTools:{map:false,compass:false,telescope:false},accessFlags,lastSelectedHexId:start.id,discoveredWaystationIds:[],hostileSiteStates:{},mapRevision:4};}
+export function revealAround(state:PlayerState,tileIdValue:string,radius=1):PlayerState {const origin=WORLD_HEX_TILES[tileIdValue];if(!origin)return state;const trackerBonus=state.activePotionEffects?.some((effect)=>effect.statusEffectId==='status_potion_tracker'&&effect.remainingMinutes>0)?1:0;radius=Math.max(0,radius+trackerBonus);const discovered=new Set(state.worldMap.discoveredHexIds||[]);discovered.add(origin.id);(origin.verticalLinks||[]).forEach((id)=>discovered.add(id));const nav=getEffectiveNavigationTools(state);const flags=new Set(state.worldMap?.accessFlags||[]);const dragonFlight=state.race==='DRAGONKIN';const skyLocal=origin.layer==='SKY'&&!hasFullTools(nav.sky)&&!dragonFlight&&!(flags.has('SKY_NATIVE_ACCESS')||state.beastkinType==='BIRD');const celestialLocal=origin.layer==='CELESTIAL'&&!hasFullTools(nav.celestial)&&!dragonFlight&&!(flags.has('CELESTIAL_NATIVE_ACCESS')&&state.beastkinType==='FOX');const effectiveRadius=(skyLocal||celestialLocal)?0:radius;Object.values(WORLD_HEX_TILES).forEach(tile=>{if(tile.layer===origin.layer&&axialDistance(tile,origin)<=effectiveRadius)discovered.add(tile.id);});const nearbyStations=WAYSTATIONS.filter(ws=>discovered.has(tileId('SURFACE',ws.q,ws.r))).map(ws=>ws.id);return{...state,worldMap:{...state.worldMap,discoveredHexIds:[...discovered],discoveredWaystationIds:Array.from(new Set([...(state.worldMap.discoveredWaystationIds||[]),...nearbyStations])),mapRevision:(state.worldMap.mapRevision||0)+1}};}

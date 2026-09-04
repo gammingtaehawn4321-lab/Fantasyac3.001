@@ -1,6 +1,7 @@
 import type { FateState, PlayerState, WorldRegionId } from '../../types';
 import { getFateDefinition, resolveFateStartLocationTag, type FateDefinition } from './fateData';
 import { findHexByLocationTag } from './worldMapSystem';
+import { isAdultPhysicalAge } from '../../config/agePolicy';
 
 export type FateActionType = 'ADVANCE_CHAPTER' | 'COMPLETE_FATE' | 'ABANDON_FATE';
 
@@ -62,14 +63,23 @@ export function normalizeFateState(
   const fallbackDefinition = getFateDefinition(raw?.fateId || '') || getFateDefinition('fate_human_01');
   const fateId = fallbackDefinition?.id || raw?.fateId || 'fate_human_01';
   const fate = getFateDefinition(fateId);
-  const completed = Array.isArray(raw?.completedChapterIds) ? raw!.completedChapterIds!.filter(Boolean) : [];
-  // v1.0의 resolved=true는 '운명 선택 완료' 의미였지 운명 서사 완수 의미가 아니었다.
-  // 새 status 필드가 없는 구 세이브는 모두 진행 중으로 마이그레이션한다.
+  const savedFateFlags = Array.isArray(raw?.fateFlags) ? raw!.fateFlags!.filter(Boolean) : [...(fate?.worldFlags || [])];
+  const completedSet = new Set(Array.isArray(raw?.completedChapterIds) ? raw!.completedChapterIds!.filter(Boolean) : []);
+  // 구 버전에서 completionFlags만 기록되고 completedChapterIds 갱신이 누락된 운명도 복구한다.
+  for (const chapter of fate?.chapters || []) {
+    const flags = chapter.completionFlags || [];
+    if (flags.length > 0 && flags.every((flag) => savedFateFlags.includes(flag))) completedSet.add(chapter.id);
+  }
+  const completed = Array.from(completedSet);
   const hasNewStatus = ['SELECTED','IN_PROGRESS','BRANCHED','COMPLETED','ABANDONED'].includes(String(raw?.status));
-  const status = hasNewStatus ? raw!.status! : 'IN_PROGRESS';
-  const nextCurrent = raw?.currentChapterId || (
-    fate?.chapters.find((chapter) => !completed.includes(chapter.id))?.id
-  );
+  let status = (hasNewStatus ? raw!.status! : 'IN_PROGRESS') as FateState['status'];
+  const allChaptersDone = Boolean(fate?.chapters?.length) && fate!.chapters.every((chapter) => completedSet.has(chapter.id));
+  if (status !== 'ABANDONED' && allChaptersDone) status = 'COMPLETED';
+  const savedCurrent = raw?.currentChapterId;
+  const nextCurrent = savedCurrent && !completedSet.has(savedCurrent)
+    ? savedCurrent
+    : fate?.chapters.find((chapter) => !completedSet.has(chapter.id))?.id;
+  const completionRewardId = status === 'COMPLETED' ? fate?.completionReward?.id : undefined;
 
   return {
     fateId,
@@ -80,9 +90,9 @@ export function normalizeFateState(
     currentChapterId: status === 'COMPLETED' ? undefined : nextCurrent,
     completedChapterIds: completed,
     choiceHistory: Array.isArray(raw?.choiceHistory) ? raw!.choiceHistory! : [],
-    fateFlags: Array.isArray(raw?.fateFlags) ? raw!.fateFlags! : [...(fate?.worldFlags || [])],
-    endingId: raw?.endingId,
-    permanentRewardIds: Array.isArray(raw?.permanentRewardIds) ? raw!.permanentRewardIds! : [],
+    fateFlags: savedFateFlags,
+    endingId: raw?.endingId || (status === 'COMPLETED' ? fate?.endings?.[0]?.id : undefined),
+    permanentRewardIds: Array.from(new Set([...(Array.isArray(raw?.permanentRewardIds) ? raw!.permanentRewardIds! : []), ...(completionRewardId ? [completionRewardId] : [])])),
     startedAtDay: Math.max(1, Number(raw?.startedAtDay ?? dayCount) || 1),
     startedAtDialogue: Math.max(0, Number(raw?.startedAtDialogue ?? dialogueCount) || 0),
     completedAtDay: raw?.completedAtDay,
@@ -216,7 +226,7 @@ export function buildFateRuntimeSummary(state: Pick<PlayerState,'fate'|'profile'
     ending ? `결말: ${ending.name}` : '',
   ].filter(Boolean);
   if (fate.userNarrativeReference && fate.userNarrativeReference.trim()) {
-    const adultEligible = Number(state.profile?.physicalAge ?? 0) >= 18;
+    const adultEligible = isAdultPhysicalAge(state.profile?.physicalAge);
     if (!fate.requiresAdult || adultEligible) lines.push(`사용자 운명 참고: ${fate.userNarrativeReference.trim()}`);
   }
   return lines.join('\n');

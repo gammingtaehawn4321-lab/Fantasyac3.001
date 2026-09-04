@@ -3,9 +3,11 @@
  *
  * 중요:
  * - 실제 UI/전투 로직에는 문장을 직접 하드코딩하지 않는다.
- * - 모든 말풍선은 이 파일의 참조 키를 통해 읽는다.
+ * - 전직/성별/세트/사용자 변형 말풍선은 이 파일에서 관리하며, 종족 말풍선 원본은 raceNarrativeReferences.ts에서 통합 관리한다.
  * - 여성 고성욕 변형과 무희 성인 변형, 무희 4세트 참조 문구는 사용자 작성 영역이라 의도적으로 빈 문자열이다.
  */
+
+import { RACE_COMBAT_SPEECH_REFERENCES, type RaceNarrativeKey } from './raceNarrativeReferences';
 
 export type CombatSpeechEvent =
   | 'BATTLE_START'
@@ -33,7 +35,7 @@ export type CombatSpeechEvent =
   | 'ESCAPE_FAIL';
 
 export type SpeechGender = 'MALE' | 'FEMALE' | 'UNKNOWN';
-export type SpeechRace = 'HUMAN' | 'ELF' | 'BEASTKIN' | 'MONSTER' | 'UNKNOWN';
+export type SpeechRace = RaceNarrativeKey | 'MONSTER' | 'UNKNOWN';
 export type SpeechCombatClass = 'NONE' | 'WARRIOR' | 'ARCHER' | 'ROGUE' | 'CLERIC' | 'DANCER' | 'MAGE';
 
 export type SpeechReferenceBundle = Record<CombatSpeechEvent, string>;
@@ -142,17 +144,9 @@ export const CLASS_GENDER_SPEECH_REFERENCES: Record<SpeechCombatClass, Record<Sp
   },
 };
 
-/** 종족은 1차 문장 뒤에 짧게 덧붙는 참조 문구다. */
+/** 종족은 1차 문장 뒤에 짧게 덧붙는 참조 문구다. 실제 문구 원본은 raceNarrativeReferences.ts에서 관리한다. */
 export const RACE_SPEECH_REFERENCES: Record<SpeechRace, PartialSpeechReferenceBundle> = {
-  HUMAN: {
-    BATTLE_START: '익숙한 방식대로 해 보자.', ACTION_HP_LOW: '버티는 건 인간의 특기지.', ATTACK_SUCCESS: '감각이 왔어.', VICTORY: '어떻게든 해냈네.',
-  },
-  ELF: {
-    BATTLE_START: '숨결과 흐름을 맞춰.', ACTION_HP_HIGH: '주변의 흐름이 선명해.', ATTACK_SUCCESS: '흐름이 이어졌어.', EVADE_SUCCESS: '바람이 먼저 알려 줬어.', VICTORY: '다시 고요해졌네.',
-  },
-  BEASTKIN: {
-    BATTLE_START: '냄새와 소리, 전부 잡았어.', ACTION_HP_LOW: '본능은 아직 살아 있어.', ATTACK_SUCCESS: '잡았다!', EVADE_SUCCESS: '그쪽 움직임은 들렸어.', HEAVY_HIT_RECEIVED: '으르… 아직 괜찮아.', VICTORY: '이제 긴장 풀어도 되겠네.',
-  },
+  ...RACE_COMBAT_SPEECH_REFERENCES,
   MONSTER: {},
   UNKNOWN: {},
 };

@@ -37,6 +37,12 @@ export type StatusEffectType =
   | 'ACCURACY_DOWN'
   | 'EVASION_UP'
   | 'CRIT_UP'
+  | 'CRIT_DAMAGE_UP'
+  | 'FIRE_RES_UP'
+  | 'ICE_RES_UP'
+  | 'LIGHTNING_RES_UP'
+  | 'POISON_IMMUNE'
+  | 'UNDYING'
   | 'SPEED_UP'
   | 'TAUNT'
   | 'REGENERATION'
@@ -125,7 +131,7 @@ export interface EquipmentRuntimeState {
 export interface BattleSpeechProfile {
   /** 원본 캐릭터 성별 문자열. resolver에서 MALE/FEMALE/UNKNOWN으로 정규화한다. */
   gender?: string;
-  /** HUMAN / ELF / BEASTKIN / MONSTER. */
+  /** HUMAN / ELF / BEASTKIN / YETI / MERFOLK / DRAGONKIN / MONSTER. */
   race?: string;
   beastkinType?: string;
   /** NONE / WARRIOR / ARCHER / ROGUE / CLERIC / DANCER / MAGE. */
@@ -280,6 +286,7 @@ export interface PlannedCombatAction {
   targetIds: string[];
   primaryTargetId?: string;
   actionDelay: number;
+  petCommandOutcome?: 'OBEY' | 'INDEPENDENT' | 'FAIL';
 }
 
 export interface BattleActionResult {

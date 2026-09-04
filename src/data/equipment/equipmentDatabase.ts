@@ -141,6 +141,7 @@ export const EQUIPMENT_DATABASE: Record<string, EquipmentDefinition> = {
     flavorText: '어둠 속을 소리 없이 배회하던 그림자 길드 자객들의 손때가 묻어 있다.',
     equipDescription: '암살자가 양손에 나누어 쥐고 연속 타격을 가하기에 최적화된 쌍둥이 단검입니다.',
     combatDescription: '보이지 않는 궤적으로 찰나의 순간 두 번의 치명적인 참격을 가합니다.',
+    effectDescription: '[혈흔 추적] 출혈 상태의 적에게 주는 피해가 15% 증가합니다.',
     sellPrice: 110,
   },
 
@@ -293,6 +294,7 @@ export const EQUIPMENT_DATABASE: Record<string, EquipmentDefinition> = {
     flavorText: '달이 차오르는 밤이면 차크람의 테두리가 서늘한 백은색으로 푸르게 빛난다.',
     equipDescription: '차갑게 빛나는 은빛 달의 정기가 깃든 정교한 쌍수 차크람입니다.',
     combatDescription: '달빛 잔상을 남기며 날아든 차크람이 적의 사지를 연속으로 베어 넘깁니다.',
+    effectDescription: '[혈흔 추적] 출혈 상태의 적에게 주는 피해가 15% 증가합니다.',
     sellPrice: 210,
   },
 
@@ -328,6 +330,7 @@ export const EQUIPMENT_DATABASE: Record<string, EquipmentDefinition> = {
     flavorText: '수정 깊은 곳을 들여다보면 붉은 안개 속에서 은밀한 속삭임이 귓가를 맴돈다.',
     equipDescription: '손에 쥐면 맥박치며 붉은 사념의 안개를 뿜어내는 마성의 크리스탈입니다.',
     combatDescription: '수정구에서 뿜어져 나온 매혹의 사념 파동이 적의 정신을 붕괴시킵니다.',
+    effectDescription: '[흡혈] 공격 피해량의 15%만큼 자신의 체력을 회복합니다.',
     sellPrice: 480,
   },
 
@@ -358,6 +361,7 @@ export const EQUIPMENT_DATABASE: Record<string, EquipmentDefinition> = {
     flavorText: '칼날에는 결코 지워지지 않는 짙은 핏자국과 냉혹한 단죄의 서약이 깃들어 있다.',
     equipDescription: '오직 단 한 번의 회전으로 적의 숨통을 끊도록 완벽한 곡선으로 벼려진 처형도입니다.',
     combatDescription: '섬뜩한 붉은 궤적이 교차하며 적의 급소를 무자비하게 절단합니다.',
+    effectDescription: '[혈흔 추적] 출혈 상태의 적에게 주는 피해가 15% 증가합니다.',
     sellPrice: 460,
   },
 
@@ -389,6 +393,7 @@ export const EQUIPMENT_DATABASE: Record<string, EquipmentDefinition> = {
     flavorText: '부채를 펼칠 때마다 은은한 향기와 함께 형형색색의 잔상이 흩날린다.',
     equipDescription: '신비로운 공작 깃털과 비단으로 짜여 우아한 춤사위를 극대화해 주는 부채입니다.',
     combatDescription: '부채를 활짝 펼치자 바람의 장막과 잔상이 흩날리며 적의 공격을 완벽히 흘려냅니다.',
+    effectDescription: '[신기루] 회피율이 10% 증가하고, 회피 성공 시 다음 행동의 속도가 상승합니다.',
     sellPrice: 450,
   },
 

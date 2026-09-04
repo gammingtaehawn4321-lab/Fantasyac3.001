@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "gameVersion": "3.3.2.1",
+  "minimumLauncherVersion": "3.3.2",
+  "publishedAt": "2026-09-01T00:00:00Z",
+  "notes": "게임/AI 지시문 패치 예시",
+  "bundle": {
+    "format": "ZIP_STORE_V1",
+    "url": "https://github.com/OWNER/UPDATE_REPO/releases/download/game-stable/Fantasyac-Game-v3.3.2.1.zip",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sizeBytes": 0
+  }
+}

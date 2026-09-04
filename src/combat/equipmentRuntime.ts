@@ -81,6 +81,13 @@ export function getRuntimeSkillModifiers(
   const kind = getActionKind(skill);
   const rt = ensureEquipmentRuntime(actor);
 
+  // 전직 특수 재능 -----------------------------------------------------------
+  // 파멸의 마도학: 모든 마법 공격 피해 +25%, 마법 방어 20% 관통.
+  if (hasTrait(actor, 'TALENT_DESTRUCTION_MASTERY') && kind === 'ATTACK' && (skill.scalingStat === 'magic' || skill.scalingStat === 'spirit')) {
+    mod.damageBonusPercent += 25;
+    mod.defenseIgnoreRatio = 1 - (1 - mod.defenseIgnoreRatio) * 0.8;
+  }
+
   // 룬워드 임계 능력 ---------------------------------------------------------
   if (hasTrait(actor, 'RUNE_VENOM_24') && kind === 'ATTACK' && target?.statusEffects.some((s) => s.type === 'POISON')) mod.actionDelayMultiplier *= 0.90;
   if (hasTrait(actor, 'RUNE_FLAME_40') && skill.element === 'FIRE' && getCounter(actor, 'rune_flame_first') > 0) { mod.costFlat -= 4; mod.consumeKeys.push('rune_flame_first'); }
@@ -109,6 +116,7 @@ export function getRuntimeSkillModifiers(
   if (adult && hasTrait(actor, 'DANCER_ADULT_DESIRE_RHYTHM') && adult.effectiveDesire >= 80 && skill.requiredClass === 'DANCER') mod.costFlat -= 1;
 
   // 일반 장비 메커니즘 --------------------------------------------------------
+  if (hasTrait(actor, 'bleed_synergy') && kind === 'ATTACK' && target?.statusEffects.some((s) => s.type === 'BLEED')) mod.damageBonusPercent += 15;
   if (hasTrait(actor, 'EQ_LOW_COST_POWER') && actor.cost <= 5 && kind === 'ATTACK') mod.damageBonusPercent += 20;
   if (hasTrait(actor, 'EQ_OPENING_DOMINANCE') && kind === 'ATTACK' && target && target.hp / Math.max(1, target.maxHp) >= 0.85) { mod.damageBonusPercent += 18; mod.hitChanceBonus += 10; }
   if (hasTrait(actor, 'EQ_HEAVY_TIMING') && kind === 'ATTACK' && (skill.actionDelay ?? 1) >= 1.2) { mod.damageBonusPercent += 16; mod.targetGaugePush -= 80; }
@@ -229,6 +237,7 @@ export function consumeRuntimeKeys(actor: BattleActor, keys: string[]) {
 
 export function effectiveEvasionRuntimeBonus(actor: BattleActor): number {
   let bonus = 0;
+  if (hasTrait(actor, 'mirage_evasion')) bonus += 10;
   if (hasTrait(actor, 'SET_BLOOD_MIRAGE_2')) bonus += Math.min(25, getCounter(actor, 'mirage') * 5);
   return bonus;
 }
@@ -321,9 +330,37 @@ export function onEquipmentDamageOutcome(
     logs.push(`${target.name}의 광명 룬이 치명상을 막아냈다.`);
   }
 
+  // 불사신의 의지: 전투당 1회 HP 1 생존 + 자신의 다음 행동 종료까지 피해 무효.
+  if (result.isHit && target.hp <= 0 && hasTrait(target, 'TALENT_UNYIELDING_STAND') && !(target.consumedBattleEffects || []).includes('talent_unyielding_stand')) {
+    target.hp = 1;
+    target.statusEffects = target.statusEffects.filter((status) => status.type !== 'INVULNERABLE');
+    target.statusEffects.push({ id:`unyielding_${Date.now()}_${target.id}`, type:'INVULNERABLE', name:'불사신의 의지', duration:1, value:1, sourceActorId:target.id });
+    target.consumedBattleEffects = [...(target.consumedBattleEffects || []), 'talent_unyielding_stand'];
+    logs.push(`${target.name}이(가) 불사신의 의지로 치명상을 버티고 잠시 모든 피해를 거부한다.`);
+  }
+
+  // 불굴 비약: 지속시간 안에 처음 발생한 치명상 1회를 HP 1로 버틴다.
+  if (result.isHit && target.hp <= 0) {
+    const undying = target.statusEffects.find((status) => status.type === 'UNDYING' && (status.value ?? 1) > 0);
+    if (undying) {
+      target.hp = 1;
+      target.statusEffects = target.statusEffects.filter((status) => status.id !== undying.id);
+      logs.push(`${target.name}이(가) 불굴 비약의 효과로 치명상을 버티고 HP 1로 생존했다.`);
+    }
+  }
+
   if (!result.isHit) {
     if (hasTrait(source, 'EQ_MISS_FOCUS')) setCounter(source, 'miss_focus', 1);
     if (result.wasEvaded) {
+      if (hasTrait(target, 'mirage_evasion')) {
+        target.statusEffects.push({ id:`mirage_evasion_${Date.now()}_${target.id}`, type:'SPEED_UP', name:'신기루 가속', duration:1, value:20, sourceActorId:target.id, skipNextDurationTick:true });
+        logs.push(`${target.name}의 신기루가 공격을 흘려내 다음 행동 속도를 높였다.`);
+      }
+      if (hasTrait(target, 'TALENT_ROGUE_EVASION_CRIT')) {
+        target.statusEffects = target.statusEffects.filter((status) => status.type !== 'CRIT_UP');
+        target.statusEffects.push({ id:`rogue_evasion_crit_${Date.now()}_${target.id}`, type:'CRIT_UP', name:'회피의 기회', duration:1, value:100, sourceActorId:target.id, skipNextDurationTick:true });
+        logs.push(`${target.name}이(가) 완벽히 회피해 다음 공격의 치명타를 확정했다.`);
+      }
       if (hasTrait(target, 'EQ_EVADE_HASTE')) addGauge(target, 250);
       if (hasTrait(target, 'SET_NIGHT_FOX_2')) addGauge(target, 250);
       if (hasTrait(target, 'SET_NIGHT_FOX_3')) setCounter(target, 'after_evade', 1);
@@ -332,6 +369,14 @@ export function onEquipmentDamageOutcome(
   }
 
   if (result.finalDamage > 0) {
+    if (hasTrait(source, 'vampirism_15') && source.hp > 0 && source.hp < source.maxHp) {
+      const requested = Math.max(1, Math.round(result.finalDamage * 0.15));
+      const healed = Math.min(requested, source.maxHp - source.hp);
+      if (healed > 0) {
+        source.hp += healed;
+        logs.push(`${source.name}이(가) 흡혈 효과로 HP ${healed}을 회복했다.`);
+      }
+    }
     ensureEquipmentRuntime(target).tookDamageSinceLastTurn = true;
     if (hasTrait(target, 'RUNE_DRAGON_24') && result.finalDamage >= target.maxHp * 0.18) {
       target.statusEffects.push({ id:`rune_dragon_scale_${Date.now()}`, type:'SHIELD', name:'역린의 용린', duration:2, value:Math.max(1, Math.round(target.maxHp * 0.10)), sourceActorId:target.id, skipNextDurationTick:true });
@@ -359,6 +404,11 @@ export function onEquipmentDamageOutcome(
   }
 
   if (result.isCrit) {
+    if (hasTrait(source, 'TALENT_ARCHER_HEADHUNTER') && target.hp > 0) {
+      target.statusEffects.push({ id:`headhunter_bleed_${Date.now()}_${target.id}`, type:'BLEED', name:'약점 사냥꾼', duration:2, value:Math.max(2, Math.round(source.stats.physicalAttack * 0.25)), sourceActorId:source.id });
+      addGauge(source, 250);
+      logs.push(`${source.name}의 약점 사냥이 출혈을 남기고 행동 게이지를 25% 회복했다.`);
+    }
     if (hasTrait(source, 'RUNE_TEMPEST_12') && !ensureEquipmentRuntime(source).flags['rune_tempest_crit_action']) { addGauge(source, 140); ensureEquipmentRuntime(source).flags['rune_tempest_crit_action'] = true; logs.push('폭풍 룬이 치명타의 흐름을 붙잡아 행동을 앞당겼다.'); }
     if (hasTrait(source, 'EQ_CRIT_MOMENTUM') && !ensureEquipmentRuntime(source).flags['crit_momentum_used_action']) { addGauge(source, 120); ensureEquipmentRuntime(source).flags['crit_momentum_used_action'] = true; logs.push('치명타의 탄력이 다음 행동을 앞당겼다.'); }
     if (hasTrait(source, 'SET_VENOM_REAPER_2')) addCounter(target, `venom_${source.id}`, 1, 5);
@@ -404,12 +454,38 @@ export function onEquipmentDamageOutcome(
     if (other) { const chain = Math.max(1, Math.round(result.finalDamage * 0.28)); other.hp = Math.max(0, other.hp - chain); logs.push(`폭풍 룬의 전도가 ${other.name}에게 이어졌다.`); }
   }
   if (target.hp <= 0 && hasTrait(source, 'RUNE_DARKNESS_24')) { source.cost = Math.min(source.maxCost, source.cost + 5); addGauge(source, 180); logs.push('암흑 룬이 쓰러진 적의 종말을 회수했다.'); }
+  if (target.hp <= 0 && hasTrait(source, 'TALENT_SOUL_HARVEST')) {
+    const killFlag = `talent_soul_harvest_${source.id}`;
+    if (!ensureEquipmentRuntime(target).flags[killFlag]) {
+      ensureEquipmentRuntime(target).flags[killFlag] = true;
+      const mpGain = Math.max(1, Math.round(source.maxMp * 0.3));
+      const beforeMp = source.mp;
+      source.mp = Math.min(source.maxMp, source.mp + mpGain);
+      // CTB 전투에서는 COST가 실제 스킬 자원이므로 영혼 강탈이 전투 중에도 체감되도록 동등 비율을 보충한다.
+      const costGain = Math.max(1, Math.round(source.maxCost * 0.3));
+      const beforeCost = source.cost;
+      source.cost = Math.min(source.maxCost, source.cost + costGain);
+      logs.push(`${source.name}이(가) 쓰러진 적의 영혼을 거둬 MP ${source.mp - beforeMp}, COST ${source.cost - beforeCost}을 회복했다.`);
+    }
+  }
   if (hasTrait(source, 'RUNE_VENOM_40') && target.statusEffects.some((s) => s.type === 'POISON')) {
     const hits = addCounter(source, `rune_venom_hits_${target.id}`, 1, 3);
     if (hits >= 3) {
       const poison = target.statusEffects.find((s) => s.type === 'POISON');
       if (poison) { const burst = Math.max(1, Math.round((poison.value || 1) * 2.5)); target.hp = Math.max(0, target.hp - burst); poison.duration = Math.max(1, poison.duration); logs.push('만독개화가 축적된 독을 폭발시켰다.'); }
       setCounter(source, `rune_venom_hits_${target.id}`, 0);
+    }
+  }
+
+  if (result.finalDamage > 0 && hasTrait(source, 'TALENT_SPELL_ACCELERATOR') && (skill.scalingStat === 'magic' || skill.scalingStat === 'spirit')) {
+    const rt = ensureEquipmentRuntime(source);
+    if (!rt.flags['talent_spell_accelerator_used_action'] && Math.random() < 0.35) {
+      rt.flags['talent_spell_accelerator_used_action'] = true;
+      source.statusEffects = source.statusEffects.filter((status) => status.type !== 'SPEED_UP' || status.name !== '주문 가속');
+      source.statusEffects.push({ id:`spell_accelerator_${Date.now()}_${source.id}`, type:'SPEED_UP', name:'주문 가속', duration:1, value:25, sourceActorId:source.id, skipNextDurationTick:true });
+      const beforeMp = source.mp;
+      source.mp = Math.min(source.maxMp, source.mp + 10);
+      logs.push(`${source.name}의 주문 가속이 발동해 다음 행동 속도가 25% 상승하고 MP ${source.mp - beforeMp}을 회복했다.`);
     }
   }
 
@@ -489,6 +565,7 @@ export function onEquipmentSkillResolved(actor: BattleActor, skill: SkillDefinit
     }
   }
   rt.flags['rune_tempest_crit_action'] = false;
+  rt.flags['talent_spell_accelerator_used_action'] = false;
 
   rt.lastSkillId = skill.id; rt.lastTargetId = targets[0]?.id; rt.lastActionKind = kind;
   if (usedCritMomentum) rt.flags['crit_momentum_used_action'] = false;

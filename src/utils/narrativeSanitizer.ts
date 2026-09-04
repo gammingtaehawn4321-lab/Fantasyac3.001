@@ -1,3 +1,6 @@
+import { sanitizeGameStateForAI } from './aiSanitizer';
+export { sanitizeGameStateForAI };
+
 /**
  * 『판타지악』 내러티브 / 스토리 텍스트 정제 및 정규화 유틸리티
  */

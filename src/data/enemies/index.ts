@@ -115,6 +115,31 @@ export const ENEMY_TEMPLATES: Record<string, EnemyTemplate> = {
     flavorQuote: '반항하는 놈은 여기서 베어 넘겨도 아무도 모른다.',
   },
 
+
+  skeleton_warrior: {
+    id: 'skeleton_warrior',
+    name: '고대 묘지의 해골 전사',
+    archetype: 'UNDEAD',
+    baseHp: 82,
+    baseMp: 12,
+    baseStats: {
+      physicalAttack: 17,
+      magicAttack: 5,
+      physicalDefense: 10,
+      magicDefense: 8,
+      accuracy: 96,
+      evasion: 7,
+      criticalChance: 7,
+      criticalDamage: 1.5,
+      actionSpeed: 10,
+    },
+    skills: ['basic_attack', 'warrior_heavy_strike', 'defend_stance'],
+    traits: ['언데드', '묘지의 수호자'],
+    expReward: 85,
+    rupeeReward: 70,
+    flavorQuote: '마른 뼈마디가 부딪히는 소리와 함께 녹슨 검이 천천히 들려 올라간다.',
+  },
+
   ruin_golem: {
     id: 'ruin_golem',
     name: '고대 유적의 수호 골렘',

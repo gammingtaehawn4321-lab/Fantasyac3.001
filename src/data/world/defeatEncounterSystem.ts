@@ -2,6 +2,7 @@ import type { BattleState } from '../../combat/combatTypes';
 import type { DefeatAftermathKind, DefeatAftermathState, PlayerState } from '../../types';
 import { getRegionalMonsterDefinition } from './monsterData';
 import { RESURRECTION_POTION_ID, RESURRECTION_POTION_NAME } from './monsterLootItems';
+import { POTION_DATABASE } from '../potions/potionDatabase';
 
 export interface DefeatAftermathEffect {
   hpRatio: number;
@@ -37,8 +38,20 @@ const DESCRIPTIONS: Record<DefeatAftermathKind, string> = {
   DEATH: '전투가 패배로 끝난 뒤에도 누구의 개입도 없었다. 상처를 버티지 못하고 결국 의식이 완전히 끊어졌다.',
 };
 
+export interface ResurrectionConsumable { itemId: string; name: string; hpRatio: number; }
+
+export function getResurrectionConsumable(state: PlayerState): ResurrectionConsumable | undefined {
+  const inventory = state.inventory || [];
+  const emergency = inventory.find((item) => item.quantity > 0 && (item.id === RESURRECTION_POTION_ID || item.name === RESURRECTION_POTION_NAME));
+  if (emergency) return { itemId: emergency.id || RESURRECTION_POTION_ID, name: emergency.name || RESURRECTION_POTION_NAME, hpRatio: 0.35 };
+  const elixir = POTION_DATABASE.elixir_resurrection;
+  const crafted = inventory.find((item) => item.quantity > 0 && (item.id === elixir.id || item.name === elixir.name));
+  if (crafted) return { itemId: crafted.id || elixir.id, name: crafted.name || elixir.name, hpRatio: Math.max(0.01, elixir.gameplayEffect.resurrectRatio || 0.5) };
+  return undefined;
+}
+
 export function hasResurrectionPotion(state: PlayerState): boolean {
-  return (state.inventory || []).some((item) => item.quantity > 0 && (item.id === RESURRECTION_POTION_ID || item.name === RESURRECTION_POTION_NAME));
+  return Boolean(getResurrectionConsumable(state));
 }
 
 export function isDefeatSkippableBattle(battle?: BattleState | null): boolean {

@@ -1,4 +1,6 @@
 import { PlayerState, GameMessage } from '../types';
+import { WORLD_HEX_TILES } from '../data/world/worldMapSystem';
+import { WORLD_DUNGEON_DATABASE } from '../data/dungeons/dungeonSystem';
 
 export type SlotId = 'AUTOSAVE' | 'SLOT_1' | 'SLOT_2' | 'SLOT_3' | 'SLOT_4' | 'SLOT_5';
 
@@ -31,6 +33,27 @@ export interface SaveSlot {
   updatedAt: number;
   preview: SaveSlotPreview;
   gameData: GameSaveData;
+}
+
+
+function resolveActualLocationName(playerState: PlayerState): string {
+  const dungeonId = playerState.dungeonExploration?.dungeonId;
+  if (dungeonId && !playerState.dungeonExploration?.completed) {
+    const dungeon = WORLD_DUNGEON_DATABASE[dungeonId];
+    if (dungeon) return `${dungeon.name} · ${playerState.dungeonExploration?.currentTileId || '탐사 중'}`;
+  }
+  const hexId = playerState.worldMap?.currentHexId;
+  const tile = hexId ? WORLD_HEX_TILES[hexId] : undefined;
+  if (tile) {
+    const place = tile.locationName || tile.featureName || tile.sectorName || tile.regionId;
+    return `${place} · ${tile.layer} (${tile.q}, ${tile.r})`;
+  }
+  return playerState.worldMap?.currentRegionId || '시작의 모험지';
+}
+
+function refreshSlotPreview(record: SaveSlot): SaveSlot {
+  if (!record?.gameData?.playerState) return record;
+  return { ...record, preview: extractPreview(record.gameData.playerState) };
 }
 
 const DB_NAME = 'fantasyak';
@@ -91,8 +114,52 @@ export function extractPreview(playerState: PlayerState): SaveSlotPreview {
     dayCount: playerState.dayCount || 1,
     currentHour: typeof playerState.currentHour === 'number' ? playerState.currentHour : 8,
     currentMinute: typeof playerState.currentMinute === 'number' ? playerState.currentMinute : 0,
-    locationName: '시작의 모험지',
+    locationName: resolveActualLocationName(playerState),
   };
+}
+
+function waitForWriteTransaction(transaction: IDBTransaction, request: IDBRequest): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error || 'IndexedDB write failed.')));
+    };
+    request.onerror = () => fail(request.error || new Error('IndexedDB write request failed.'));
+    transaction.onerror = () => fail(transaction.error || new Error('IndexedDB write transaction failed.'));
+    transaction.onabort = () => fail(transaction.error || new Error('IndexedDB write transaction aborted.'));
+    transaction.oncomplete = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+  });
+}
+
+async function readAllSaveSlotRecordsStrict(): Promise<SaveSlot[]> {
+  const db = await getDB();
+  const transaction = db.transaction(STORE_NAME, 'readonly');
+  const store = transaction.objectStore(STORE_NAME);
+  return new Promise<SaveSlot[]>((resolve, reject) => {
+    let records: SaveSlot[] = [];
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error || 'IndexedDB save read failed.')));
+    };
+    const request = store.getAll();
+    request.onsuccess = () => { records = request.result || []; };
+    request.onerror = () => fail(request.error || new Error('IndexedDB save read failed.'));
+    transaction.onerror = () => fail(transaction.error || new Error('IndexedDB save transaction failed.'));
+    transaction.onabort = () => fail(transaction.error || new Error('IndexedDB save transaction aborted.'));
+    transaction.oncomplete = () => {
+      if (settled) return;
+      settled = true;
+      resolve(records);
+    };
+  });
 }
 
 export async function getAllSaveSlots(): Promise<Record<SlotId, SaveSlot | null>> {
@@ -106,19 +173,10 @@ export async function getAllSaveSlots(): Promise<Record<SlotId, SaveSlot | null>
   };
 
   try {
-    const db = await getDB();
-    const transaction = db.transaction(STORE_NAME, 'readonly');
-    const store = transaction.objectStore(STORE_NAME);
-
-    const allRecords = await new Promise<SaveSlot[]>((resolve, reject) => {
-      const request = store.getAll();
-      request.onsuccess = () => resolve(request.result || []);
-      request.onerror = () => reject(request.error);
-    });
-
+    const allRecords = await readAllSaveSlotRecordsStrict();
     for (const record of allRecords) {
       if (record && record.slotId && result.hasOwnProperty(record.slotId)) {
-        result[record.slotId as SlotId] = record;
+        result[record.slotId as SlotId] = refreshSlotPreview(record);
       }
     }
   } catch (error) {
@@ -136,7 +194,7 @@ export async function getSaveSlot(slotId: SlotId): Promise<SaveSlot | null> {
 
     return await new Promise<SaveSlot | null>((resolve, reject) => {
       const request = store.get(slotId);
-      request.onsuccess = () => resolve(request.result || null);
+      request.onsuccess = () => resolve(request.result ? refreshSlotPreview(request.result) : null);
       request.onerror = () => reject(request.error);
     });
   } catch (error) {
@@ -185,11 +243,8 @@ export async function saveSlotData(
     const transaction = db.transaction(STORE_NAME, 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
 
-    await new Promise<void>((resolve, reject) => {
-      const request = store.put(slotData);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+    const request = store.put(slotData);
+    await waitForWriteTransaction(transaction, request);
 
     return slotData;
   });
@@ -205,11 +260,8 @@ export async function deleteSaveSlot(slotId: SlotId): Promise<boolean> {
     const transaction = db.transaction(STORE_NAME, 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
 
-    await new Promise<void>((resolve, reject) => {
-      const request = store.delete(slotId);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+    const request = store.delete(slotId);
+    await waitForWriteTransaction(transaction, request);
 
     return true;
   });
@@ -233,11 +285,8 @@ export async function renameSaveSlot(slotId: SlotId, newName: string): Promise<S
     const transaction = db.transaction(STORE_NAME, 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
 
-    await new Promise<void>((resolve, reject) => {
-      const request = store.put(existing);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+    const request = store.put(existing);
+    await waitForWriteTransaction(transaction, request);
 
     return existing;
   });
@@ -330,4 +379,59 @@ export async function checkAndMigrateLegacyLocalStorage(): Promise<boolean> {
     console.error('Failed legacy localStorage migration check:', error);
     return false;
   }
+}
+
+export interface SaveBackupBundle {
+  format: 'FANTASYAC_SAVE_BUNDLE';
+  bundleVersion: 1;
+  exportedAt: number;
+  saveVersion: number;
+  slots: SaveSlot[];
+}
+
+export async function createSaveBackupBundle(): Promise<SaveBackupBundle> {
+  // Update backups are safety-critical: unlike the ordinary save-list UI, never
+  // convert an IndexedDB read failure into a silently empty backup.
+  // If the most recent queued save failed, do not pretend an older DB snapshot is a safe backup.
+  await saveQueuePromise;
+  const records = await readAllSaveSlotRecordsStrict();
+  const slots = records
+    .filter((slot): slot is SaveSlot => Boolean(slot?.slotId && slot?.gameData?.playerState))
+    .map(refreshSlotPreview);
+  return {
+    format: 'FANTASYAC_SAVE_BUNDLE',
+    bundleVersion: 1,
+    exportedAt: Date.now(),
+    saveVersion: CURRENT_SAVE_VERSION,
+    slots,
+  };
+}
+
+export function parseSaveBackupBundle(raw: string): SaveBackupBundle {
+  const parsed = JSON.parse(raw);
+  if (!parsed || parsed.format !== 'FANTASYAC_SAVE_BUNDLE' || !Array.isArray(parsed.slots)) {
+    throw new Error('판타지악 세이브 백업 파일 형식이 아닙니다.');
+  }
+  const validSlots = parsed.slots.filter((slot: any) =>
+    slot &&
+    ['AUTOSAVE', 'SLOT_1', 'SLOT_2', 'SLOT_3', 'SLOT_4', 'SLOT_5'].includes(slot.slotId) &&
+    slot.gameData?.playerState
+  );
+  return {
+    format: 'FANTASYAC_SAVE_BUNDLE',
+    bundleVersion: 1,
+    exportedAt: Number(parsed.exportedAt) || Date.now(),
+    saveVersion: Number(parsed.saveVersion) || 1,
+    slots: validSlots,
+  };
+}
+
+export async function restoreSaveBackupBundle(bundle: SaveBackupBundle): Promise<number> {
+  let restored = 0;
+  for (const slot of bundle.slots) {
+    const migrated = migrateSaveData(slot.gameData);
+    await saveSlotData(slot.slotId, migrated, slot.slotName);
+    restored += 1;
+  }
+  return restored;
 }

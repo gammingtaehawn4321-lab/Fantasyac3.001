@@ -1,4 +1,5 @@
 import React from 'react';
+import IllustrationImage from './IllustrationImage';
 import {
   X,
   Package,
@@ -28,7 +29,7 @@ import {
   BAG_TYPE_KOREAN,
   BAG_RARITY_KOREAN,
 } from '../data/bags';
-import { getItemDefinition } from '../data/items/itemDatabase';
+import { getItemDefinition, inferItemMetadata, inferUsageHint } from '../data/items/itemDatabase';
 import {
   EQUIPMENT_DATABASE,
   EQUIPMENT_SLOT_KOREAN,
@@ -59,6 +60,7 @@ const CATEGORY_KOREAN: Record<ItemCategory, string> = {
   EQUIPMENT: '장비',
   KEY: '열쇠',
   QUEST: '퀘스트 아이템',
+  MAP: '지도',
   TOOL: '도구',
   BOOK: '서적 / 문서',
   DOCUMENT: '문서',
@@ -125,6 +127,7 @@ export function ItemDetailModal({
   const isEquipment = !!equipDef;
 
   const itemDef = item.id ? getItemDefinition(item.id) : getItemDefinition(item.name);
+  const inferredMeta = inferItemMetadata(item.id || item.name, item.description);
 
   // 2. 카테고리 판별
   let categoryLabel = '기타 물품';
@@ -136,12 +139,16 @@ export function ItemDetailModal({
     categoryLabel = CATEGORY_KOREAN[item.category];
   } else if (itemDef?.category && CATEGORY_KOREAN[itemDef.category]) {
     categoryLabel = CATEGORY_KOREAN[itemDef.category];
+  } else {
+    categoryLabel = CATEGORY_KOREAN[inferredMeta.category];
   }
 
   // 3. 중요 아이템 (폐기 불가) 판별
   const isQuestOrKey =
     itemDef?.category === 'QUEST' ||
     itemDef?.category === 'KEY' ||
+    inferredMeta.category === 'QUEST' ||
+    inferredMeta.category === 'KEY' ||
     item.category === 'QUEST' ||
     item.category === 'KEY' ||
     item.name.includes('열쇠') ||
@@ -156,6 +163,9 @@ export function ItemDetailModal({
     !isBag &&
     !isEquipment &&
     (itemDef?.usable ||
+      inferredMeta.usable ||
+      inferredMeta.category === 'MAP' ||
+      item.category === 'MAP' ||
       item.category === 'CONSUMABLE' ||
       itemDef?.category === 'CONSUMABLE' ||
       item.name.includes('약') ||
@@ -170,7 +180,7 @@ export function ItemDetailModal({
     equipDef?.description ||
     bagDef?.description ||
     equipDef?.equipDescription ||
-    '아이템에 대한 상세 설명이 없습니다.';
+    inferredMeta.description;
 
   // 6. 플레이버 텍스트 (우선순위: item 인스턴스 > ItemDefinition > 장비/가방 Definition)
   const displayFlavorText =
@@ -179,6 +189,10 @@ export function ItemDetailModal({
     equipDef?.flavorText ||
     bagDef?.flavorText ||
     null;
+
+  const displayUsageHint = itemDef?.usageHint || (bagDef
+    ? `사용처: 가방 슬롯에 장착하여 소지 무게 한도를 +${bagDef.bonusCarryWeight.toFixed(1)}kg 확장합니다.`
+    : inferUsageHint(item.name, itemDef?.category || inferredMeta.category, itemDef?.uses));
 
   // 7. 삽화 이미지 URL
   const illustrationUrl =
@@ -249,7 +263,7 @@ export function ItemDetailModal({
           {/* 1. 상단 삽화 영역 */}
           <div className="w-full h-44 rounded-lg bg-stone-950 border border-stone-800/80 flex flex-col items-center justify-center overflow-hidden relative group">
             {illustrationUrl ? (
-              <img
+              <IllustrationImage
                 src={illustrationUrl}
                 alt={item.name}
                 referrerPolicy="no-referrer"
@@ -309,6 +323,14 @@ export function ItemDetailModal({
             <h3 className="text-[11px] font-semibold text-stone-400">설명</h3>
             <p className="text-stone-300 leading-relaxed bg-stone-950/40 p-2.5 rounded-lg border border-stone-800/60">
               {displayDescription}
+            </p>
+          </div>
+
+          {/* 4. 실제 사용처 */}
+          <div className="space-y-1">
+            <h3 className="text-[11px] font-semibold text-sky-300">사용처</h3>
+            <p className="text-sky-100/90 leading-relaxed bg-sky-950/20 p-2.5 rounded-lg border border-sky-900/40">
+              {displayUsageHint.replace(/^사용처:\s*/, '')}
             </p>
           </div>
 

@@ -13,6 +13,7 @@ import {
   SpeechGender,
   SpeechRace,
 } from '../data/combatSpeechReferences';
+import { resolveRaceNarrativeKey } from '../data/raceNarrativeReferences';
 
 export interface ResolvedCombatSpeech {
   text: string;
@@ -46,8 +47,11 @@ function normalizeGender(value?: string): SpeechGender {
   return 'UNKNOWN';
 }
 
-function normalizeRace(value?: string): SpeechRace {
-  if (value === 'HUMAN' || value === 'ELF' || value === 'BEASTKIN' || value === 'MONSTER') return value;
+function normalizeRace(value?: string, beastkinType?: string): SpeechRace {
+  if (value === 'MONSTER') return 'MONSTER';
+  if (value === 'HUMAN' || value === 'ELF' || value === 'BEASTKIN' || value === 'YETI' || value === 'MERFOLK' || value === 'DRAGONKIN') {
+    return resolveRaceNarrativeKey(value, beastkinType);
+  }
   return 'UNKNOWN';
 }
 
@@ -75,7 +79,7 @@ function strongestActiveSet(actor: BattleActor) {
 export function resolveCombatSpeech(actor: BattleActor, event: CombatSpeechEvent): ResolvedCombatSpeech | undefined {
   const profile = actor.speechProfile;
   const gender = normalizeGender(profile?.gender);
-  const race = normalizeRace(profile?.race || (actor.isPlayer || actor.isCompanion ? 'UNKNOWN' : 'MONSTER'));
+  const race = normalizeRace(profile?.race || (actor.isPlayer || actor.isCompanion ? 'UNKNOWN' : 'MONSTER'), profile?.beastkinType);
   const combatClass = normalizeClass(profile?.combatClass);
   const referenceKeys: string[] = [];
 

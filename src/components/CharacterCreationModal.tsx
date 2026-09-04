@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, Clover, Dumbbell, Heart, Shield, Wind, Brain, Zap, CheckCircle2, Map, Sparkles } from 'lucide-react';
+import { ChangeEvent, useEffect, useMemo, useState } from 'react';
+import { ChevronLeft, ChevronRight, Clover, Dumbbell, Heart, Shield, Wind, Brain, Zap, CheckCircle2, Map, Sparkles, Upload, Trash2 } from 'lucide-react';
 import type { BeastkinType, BuildType, BreastSizeType, HipSizeType, CharacterProfile, PlayerState, PlayerStats, Race, SpeechStyleData, WorldRegionId } from '../types';
 import { BEASTKIN_SUB_TYPES, getRaceDefinition } from '../data/raceData';
 import { SPEECH_STYLE_PRESETS } from '../data/speechPresets';
@@ -8,6 +8,7 @@ import { getAvailableFates, getStartRegionsForRace, resolveFateStartLocationTag 
 import { createInitialFateState } from '../data/world/fateSystem';
 import { REGION_DEFINITIONS } from '../data/world/regionData';
 import { createInitialWorldMapState, findHexByLocationTag } from '../data/world/worldMapSystem';
+import { CHARACTER_MIN_PHYSICAL_AGE, DEFAULT_PLAYER_PHYSICAL_AGE, getAdultMinPhysicalAge, isAdultPhysicalAge, normalizeCharacterPhysicalAge } from '../config/agePolicy';
 
 interface CharacterCreationModalProps { isOpen:boolean; onComplete:(state:PlayerState)=>void; onCancel?:()=>void; isInitialGame?:boolean; }
 type WizardStep=1|2|3|4|5|6|7;
@@ -18,21 +19,80 @@ const statCfg:Array<{key:keyof PlayerStats;label:string;Icon:any}>=[
   {key:'strength',label:'근력',Icon:Dumbbell},{key:'vitality',label:'체력',Icon:Heart},{key:'agility',label:'민첩',Icon:Wind},{key:'intelligence',label:'지능',Icon:Zap},{key:'spirit',label:'정신',Icon:Brain},{key:'luck',label:'행운',Icon:Clover},
 ];
 
+function processAndResizeImage(file: File, maxDimension = 1024, quality = 0.85): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(e.target?.result as string);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+        const mimeType = file.type === 'image/png' || file.type === 'image/webp' ? file.type : 'image/jpeg';
+        const dataUrl = canvas.toDataURL(mimeType, quality);
+        resolve(dataUrl);
+      };
+      img.onerror = () => reject(new Error('이미지 로딩 실패'));
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => reject(new Error('파일 읽기 실패'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function CharacterCreationModal({isOpen,onComplete,onCancel}:CharacterCreationModalProps){
   const [step,setStep]=useState<WizardStep>(1);
-  const [name,setName]=useState('모험가'); const [physicalAge,setPhysicalAge]=useState(18);
+  const [name,setName]=useState('모험가'); const [physicalAge,setPhysicalAge]=useState(DEFAULT_PLAYER_PHYSICAL_AGE);
   const [speechId,setSpeechId]=useState('calm');
   const [race,setRace]=useState<Race>('HUMAN'); const [beastkin,setBeastkin]=useState<BeastkinType>('CAT');
   const [height,setHeight]=useState(165); const [build,setBuild]=useState<BuildType>('AVERAGE');
   const [breastSize,setBreastSize]=useState<BreastSizeType>('SLENDER'); const [hipSize,setHipSize]=useState<HipSizeType>('AVERAGE');
   const [hairColor,setHairColor]=useState('검은색'); const [hairStyle,setHairStyle]=useState('단정한 단발'); const [eyeColor,setEyeColor]=useState('갈색');
   const [features,setFeatures]=useState(''); const [appearance,setAppearance]=useState('');
+  const [portraitUrl,setPortraitUrl]=useState<string|undefined>(undefined);
+  const [isUploadingImage,setIsUploadingImage]=useState(false);
   const [bonus,setBonus]=useState<PlayerStats>({strength:0,vitality:0,agility:0,intelligence:0,spirit:0,luck:0});
   const regions=getStartRegionsForRace(race,beastkin); const [regionId,setRegionId]=useState<WorldRegionId>('GRANDIA');
   useEffect(()=>{if(!regions.includes(regionId))setRegionId(regions[0]);},[race,beastkin]);
   const fates=useMemo(()=>getAvailableFates(race,regionId,beastkin,physicalAge),[race,regionId,beastkin,physicalAge]); const [fateId,setFateId]=useState('');
   useEffect(()=>{if(!fates.some(f=>f.id===fateId))setFateId(fates[0]?.id||'');},[race,regionId,beastkin,fates.length]);
   if(!isOpen)return null;
+
+  const handleImageUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setIsUploadingImage(true);
+      const dataUrl = await processAndResizeImage(file);
+      setPortraitUrl(dataUrl);
+    } catch (err) {
+      console.error('캐릭터 삽화 업로드 중 오류 발생:', err);
+    } finally {
+      setIsUploadingImage(false);
+      e.target.value = '';
+    }
+  };
+
   const allocated=(Object.values(bonus) as number[]).reduce((a,b)=>a+b,0); const remain=5-allocated;
   const base=Object.fromEntries(Object.keys(INITIAL_PLAYER_STATS).map(k=>[k,(INITIAL_PLAYER_STATS as any)[k]+(bonus as any)[k]])) as PlayerStats;
   const eff=calculateEffectiveStats(base,race,race==='BEASTKIN'?beastkin:undefined); const raceDef=getRaceDefinition(race,race==='BEASTKIN'?beastkin:undefined);
@@ -44,7 +104,7 @@ export function CharacterCreationModal({isOpen,onComplete,onCancel}:CharacterCre
     if(!fate)return;
     const beastFeatures = race==='BEASTKIN' ? (beastkin==='BIRD'?{hasWings:true,wingDescription:'등 뒤에 펼쳐진 날개',furDescription:'부드러운 깃털'}:{earDescription:'쫑긋 솟은 귀',tailDescription:'유연한 꼬리',furDescription:'부드러운 털'}) : undefined;
     const specialFeature = race==='YETI' ? '흰 머리와 굽은 뿔을 지닌 암컷 설인' : race==='MERFOLK' ? '비늘과 뿔, 꼬리를 지닌 인어족' : race==='DRAGONKIN' ? (features || '용의 뿔과 비늘, 신성한 기운을 지닌 용족') : features;
-    const profile:CharacterProfile={inGameName:name.trim(),name:name.trim(),gender:'여성',physicalAge:Math.max(13,physicalAge),race,beastkinType:race==='BEASTKIN'?beastkin:undefined,height,build,breastSize,hipSize,hairColor,hairStyle,eyeColor,skinDescription:'건강한 살결',features:specialFeature,appearance,speechStyle:speech,beastFeatures};
+    const profile:CharacterProfile={inGameName:name.trim(),name:name.trim(),gender:'여성',physicalAge:normalizeCharacterPhysicalAge(physicalAge),race,beastkinType:race==='BEASTKIN'?beastkin:undefined,height,build,breastSize,hipSize,hairColor,hairStyle,eyeColor,skinDescription:'건강한 살결',features:specialFeature,appearance,speechStyle:speech,beastFeatures,portraitUrl};
     let state=createNewPlayerState(profile,base,remain,true);
     const startLocationTag=resolveFateStartLocationTag(fate,regionId);
     const startHex=findHexByLocationTag(startLocationTag)||findHexByLocationTag('THE_PELLESS_LOWER')!;
@@ -58,27 +118,86 @@ export function CharacterCreationModal({isOpen,onComplete,onCancel}:CharacterCre
     <div className="w-full max-w-2xl max-h-[94dvh] overflow-hidden rounded-2xl border border-stone-800 bg-stone-900 shadow-2xl flex flex-col">
       <div className="p-3 border-b border-stone-800 bg-stone-950/80"><div className="flex items-center justify-between"><h2 className="font-bold text-stone-100 flex items-center gap-2"><Shield className="w-4 h-4 text-amber-400"/>판타지악 캐릭터 생성</h2><span className="text-xs text-amber-300">{step}/7</span></div><div className="grid grid-cols-7 gap-1 mt-2">{STEPS.map((s,i)=><button key={s[0]} onClick={()=>i+1<=step&&setStep((i+1) as WizardStep)} className={`h-1.5 rounded ${i+1<=step?'bg-amber-500':'bg-stone-800'}`}/>)}</div><div className="text-xs mt-2"><b className="text-stone-200">{STEPS[step-1][0]}</b><span className="text-stone-500 ml-2">{STEPS[step-1][1]}</span></div></div>
       <div className="flex-1 overflow-y-auto p-4 text-sm space-y-3">
-        {step===1&&<><div className={card}><label className="text-stone-300 font-bold">이름</label><input value={name} onChange={e=>setName(e.target.value)} className="mt-2 w-full bg-stone-900 border border-stone-700 rounded-lg p-2"/></div><div className={card}><div className="flex justify-between"><b>성별</b><span className="text-rose-300 font-bold">여성 고정</span></div><p className="text-stone-500 mt-1">v1.0의 플레이어블 캐릭터는 여성으로 고정됩니다.</p></div><div className={card}><div className="flex justify-between"><b>신체적 나이</b><span>{physicalAge}세</span></div><input type="range" min={13} max={100} value={physicalAge} onChange={e=>setPhysicalAge(+e.target.value)} className="w-full accent-amber-500 mt-2"/></div><div className={card}><b>말투</b><div className="grid grid-cols-3 gap-2 mt-2">{SPEECH_STYLE_PRESETS.map(p=><button key={p.id} onClick={()=>setSpeechId(p.id)} className={`p-2 rounded-lg border ${speechId===p.id?'border-amber-500 bg-amber-500/10':'border-stone-800'}`}>{p.name}</button>)}</div></div></>}
+        {step===1&&<><div className={card}><label className="text-stone-300 font-bold">이름</label><input value={name} onChange={e=>setName(e.target.value)} className="mt-2 w-full bg-stone-900 border border-stone-700 rounded-lg p-2"/></div><div className={card}><div className="flex justify-between"><b>성별</b><span className="text-rose-300 font-bold">여성 고정</span></div><p className="text-stone-500 mt-1">v1.0의 플레이어블 캐릭터는 여성으로 고정됩니다.</p></div><div className={card}><div className="flex justify-between"><b>신체적 나이</b><span>{physicalAge}세</span></div><input type="range" min={CHARACTER_MIN_PHYSICAL_AGE} max={100} value={physicalAge} onChange={e=>setPhysicalAge(+e.target.value)} className="w-full accent-amber-500 mt-2"/></div><div className={card}><b>말투</b><div className="grid grid-cols-3 gap-2 mt-2">{SPEECH_STYLE_PRESETS.map(p=><button key={p.id} onClick={()=>setSpeechId(p.id)} className={`p-2 rounded-lg border ${speechId===p.id?'border-amber-500 bg-amber-500/10':'border-stone-800'}`}>{p.name}</button>)}</div></div></>}
         {step===2&&<><div className="grid grid-cols-3 sm:grid-cols-6 gap-2">{([{id:'HUMAN',name:'인간',icon:'👤'},{id:'ELF',name:'엘프',icon:'🌿'},{id:'BEASTKIN',name:'수인',icon:'🐾'},{id:'YETI',name:'설인',icon:'❄️'},{id:'MERFOLK',name:'인어족',icon:'🫧'},{id:'DRAGONKIN',name:'용족',icon:'🐉'}] as Array<{id:Race;name:string;icon:string}>).map(r=><button key={r.id} onClick={()=>setRace(r.id)} className={`p-3 rounded-xl border ${race===r.id?'border-amber-500 bg-amber-500/10':'border-stone-800'}`}><div className="text-2xl">{r.icon}</div><b>{r.name}</b></button>)}</div>{race==='BEASTKIN'&&<div className={card}><b>수인 종류 · 전 수인 여성</b><div className="grid grid-cols-5 gap-2 mt-2">{BEASTKIN_SUB_TYPES.map(b=><button key={b.type} onClick={()=>setBeastkin(b.type)} className={`p-2 rounded-lg border ${beastkin===b.type?'border-amber-500':'border-stone-800'}`}>{b.icon}<br/>{b.label}</button>)}</div></div>}<div className={card}><b>{raceDef.subName||raceDef.name}</b><p className="text-stone-400 mt-1">{raceDef.description}</p><p className="text-amber-300 mt-2">{raceDef.summary}</p></div></>}
         {step===3&&<>
+          <div className={card}>
+            <div className="flex items-center justify-between mb-2">
+              <b className="text-stone-200 flex items-center gap-1.5">
+                <Upload className="w-4 h-4 text-amber-400" />
+                캐릭터 삽화 (초상화 이미지)
+              </b>
+              {portraitUrl && (
+                <button
+                  type="button"
+                  onClick={() => setPortraitUrl(undefined)}
+                  className="px-2.5 py-1 text-xs text-rose-400 hover:text-rose-300 border border-rose-800/80 hover:bg-rose-950/40 rounded-lg flex items-center gap-1 transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  이미지 제거
+                </button>
+              )}
+            </div>
+            <div className="flex flex-col sm:flex-row items-center gap-3">
+              {portraitUrl ? (
+                <div className="relative w-24 h-32 rounded-xl overflow-hidden border border-amber-500/50 bg-stone-950 shrink-0 shadow-md">
+                  <img src={portraitUrl} alt="캐릭터 삽화 미리보기" className="w-full h-full object-cover object-top" />
+                  <div className="absolute bottom-0 inset-x-0 bg-black/70 text-[10px] text-amber-300 text-center py-0.5">
+                    미리보기
+                  </div>
+                </div>
+              ) : (
+                <div className="w-24 h-32 rounded-xl border-2 border-dashed border-stone-800 bg-stone-950/50 flex flex-col items-center justify-center text-stone-600 shrink-0">
+                  <Upload className="w-6 h-6 mb-1 text-stone-600" />
+                  <span className="text-[10px]">미등록</span>
+                </div>
+              )}
+              <div className="flex-1 space-y-2 text-xs">
+                <p className="text-stone-400 leading-relaxed">
+                  캐릭터 초상화로 사용할 이미지를 등록합니다. 등록된 이미지는 HUD, 상태창, 장비창, 전투 화면에 공통으로 표시됩니다.
+                </p>
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor="character-portrait-input"
+                    className="px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-xs cursor-pointer flex items-center gap-1.5 transition-colors active:scale-95"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    {portraitUrl ? '이미지 변경' : '이미지 파일 선택'}
+                  </label>
+                  <input
+                    id="character-portrait-input"
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageUpload}
+                    className="hidden"
+                  />
+                  {isUploadingImage && <span className="text-amber-400 text-xs animate-pulse">이미지 처리 중...</span>}
+                </div>
+                <p className="text-[10px] text-stone-500">
+                  * 최대 1024px 비율로 자동 압축하여 세이브 파일에 안전하게 저장됩니다.
+                </p>
+              </div>
+            </div>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div className={card}><b>키</b><input type="number" value={height} onChange={e=>setHeight(+e.target.value)} className="w-full mt-2 bg-stone-900 p-2 rounded"/></div>
             <div className={card}><b>체격</b><select value={build} onChange={e=>setBuild(e.target.value as BuildType)} className="w-full mt-2 bg-stone-900 p-2 rounded"><option value="SMALL">작고 날렵함</option><option value="AVERAGE">균형 잡힘</option><option value="LARGE">건장함</option></select></div>
           </div>
-          {physicalAge>=18&&<div className="grid grid-cols-2 gap-3">
+          {isAdultPhysicalAge(physicalAge)&&<div className="grid grid-cols-2 gap-3">
             <div className={card}><b>가슴 유형</b><select value={breastSize} onChange={e=>setBreastSize(e.target.value as BreastSizeType)} className="w-full mt-2 bg-stone-900 p-2 rounded"><option value="SMALL">빈유</option><option value="SLENDER">슬렌더형</option><option value="LARGE">거유</option></select><p className="text-[10px] text-stone-500 mt-1">Gemini 참조 문구는 사용자 파일에서 별도로 작성합니다.</p></div>
             <div className={card}><b>엉덩이 유형</b><select value={hipSize} onChange={e=>setHipSize(e.target.value as HipSizeType)} className="w-full mt-2 bg-stone-900 p-2 rounded"><option value="SLIM">부실함</option><option value="AVERAGE">적당함</option><option value="FULL">풍만함</option></select><p className="text-[10px] text-stone-500 mt-1">Gemini 참조 문구는 사용자 파일에서 별도로 작성합니다.</p></div>
           </div>}
-          {physicalAge<18&&<div className={card}><p className="text-xs text-stone-500">성인 신체 유형 선택은 신체적 나이 18세 이상에서만 사용됩니다.</p></div>}
+          {!isAdultPhysicalAge(physicalAge)&&<div className={card}><p className="text-xs text-stone-500">성인 신체 유형 선택은 신체적 나이 {getAdultMinPhysicalAge()}세 이상에서만 사용됩니다.</p></div>}
           {[['머리색',hairColor,setHairColor],['머리형',hairStyle,setHairStyle],['눈색',eyeColor,setEyeColor]] .map(([l,v,setter]:any)=><div className={card} key={l}><b>{l}</b><input value={v} onChange={e=>setter(e.target.value)} className="w-full mt-2 bg-stone-900 p-2 rounded"/></div>)}
           <div className={card}><b>추가 특징</b><textarea value={features} onChange={e=>setFeatures(e.target.value)} className="w-full mt-2 bg-stone-900 p-2 rounded"/><b className="block mt-3">전체 외형 설명</b><textarea value={appearance} onChange={e=>setAppearance(e.target.value)} className="w-full mt-2 bg-stone-900 p-2 rounded"/></div>
         </>}
         {step===4&&<><div className="text-right text-amber-300">남은 포인트 {remain}</div><div className="grid grid-cols-2 gap-2">{statCfg.map(({key,label,Icon})=><div key={key} className={card}><div className="flex items-center justify-between"><span className="flex gap-2"><Icon className="w-4 h-4"/>{label}</span><b>{eff[key]}</b></div><div className="flex gap-2 mt-2"><button onClick={()=>bonus[key]>0&&setBonus({...bonus,[key]:bonus[key]-1})} className="px-3 py-1 bg-stone-800 rounded">-</button><span className="flex-1 text-center">+{bonus[key]}</span><button onClick={()=>remain>0&&setBonus({...bonus,[key]:bonus[key]+1})} className="px-3 py-1 bg-stone-800 rounded">+</button></div></div>)}</div><div className={card}>HP {calculateMaxHp(eff.vitality)} · MP {calculateMaxMana(eff.intelligence)} · 정신력 {calculateMaxSanity(eff.spirit)}</div></>}
         {step===5&&<><div className="grid grid-cols-2 gap-2">{regions.map(id=>{const r=REGION_DEFINITIONS[id];return <button key={id} onClick={()=>setRegionId(id)} className={`text-left p-3 rounded-xl border ${regionId===id?'border-amber-500 bg-amber-500/10':'border-stone-800'}`}><b>{r.name}</b><p className="text-xs text-stone-400 mt-1">{r.summary}</p></button>})}</div><div className={card}><Map className="inline w-4 h-4 mr-1"/><b>{REGION_DEFINITIONS[regionId].name}</b><p className="text-stone-400 mt-2">{REGION_DEFINITIONS[regionId].geography}</p></div></>}
         {step===6&&<>{fates.length===0?<div className={card}>선택 가능한 운명이 없습니다.</div>:fates.map(f=><button key={f.id} onClick={()=>setFateId(f.id)} className={`w-full text-left p-4 rounded-xl border ${fateId===f.id?'border-violet-400 bg-violet-500/10':'border-stone-800'}`}><div className="flex items-center gap-2 flex-wrap"><Sparkles className="w-4 h-4 text-violet-300"/><b>{f.name}</b>{f.raceExclusiveLabel&&<span className="text-[10px] px-1.5 py-0.5 rounded-full border border-violet-500/40 text-violet-300">{f.raceExclusiveLabel}</span>}{f.requiresAdult&&<span className="text-[10px] px-1.5 py-0.5 rounded-full border border-rose-500/40 text-rose-300">성인 전용</span>}</div><p className="text-stone-400 mt-2">{f.description}</p><div className="text-xs mt-2 text-stone-500">운명장 {f.chapters.length}개 · 결말 {f.endings.length}개 · 시작 루피 {f.startingRupees}{f.startingItems.length?` · ${f.startingItems.map(i=>`${i.name}×${i.quantity}`).join(', ')}`:''}</div><p className="text-xs text-amber-200 mt-2">{f.introSituation}</p></button>)}</>}
-        {step===7&&<><div className={card}><div className="flex items-center gap-2"><CheckCircle2 className="text-emerald-400"/><b className="text-lg">{name}</b><span className="text-rose-300">여성</span></div><div className="grid grid-cols-2 gap-2 mt-3 text-stone-400"><span>종족</span><b className="text-stone-200">{raceDef.subName||raceDef.name}</b><span>시작 지역</span><b className="text-stone-200">{REGION_DEFINITIONS[regionId].name}</b><span>운명</span><b className="text-stone-200">{fate?.name}</b><span>나이</span><b className="text-stone-200">{physicalAge}세</b></div></div><button onClick={finish} disabled={!fate} className="w-full py-4 rounded-xl bg-amber-500 text-stone-950 font-black disabled:opacity-40">이 운명을 받아들이고 모험 시작</button></>}
+        {step===7&&<><div className={card}><div className="flex items-center gap-3">{portraitUrl?<img src={portraitUrl} alt="" className="w-12 h-16 object-cover object-top rounded-lg border border-amber-500/40 shrink-0"/>:null}<div><div className="flex items-center gap-2"><CheckCircle2 className="text-emerald-400"/><b className="text-lg">{name}</b><span className="text-rose-300">여성</span></div><div className="text-xs text-stone-400 mt-1">{raceDef.subName||raceDef.name} · {physicalAge}세 · {REGION_DEFINITIONS[regionId].name}</div></div></div><div className="grid grid-cols-2 gap-2 mt-3 text-stone-400"><span>종족</span><b className="text-stone-200">{raceDef.subName||raceDef.name}</b><span>시작 지역</span><b className="text-stone-200">{REGION_DEFINITIONS[regionId].name}</b><span>운명</span><b className="text-stone-200">{fate?.name}</b><span>나이</span><b className="text-stone-200">{physicalAge}세</b></div></div><button onClick={finish} disabled={!fate} className="w-full py-4 rounded-xl bg-amber-500 text-stone-950 font-black disabled:opacity-40">이 운명을 받아들이고 모험 시작</button></>}
       </div>
       <div className="p-3 border-t border-stone-800 flex justify-between"><button onClick={()=>step===1?(onCancel?.()):prev()} className="px-4 py-2 rounded-lg bg-stone-800 flex gap-1"><ChevronLeft className="w-4"/>{step===1?'취소':'이전'}</button>{step<7&&<button onClick={next} disabled={!name.trim()||(step===6&&!fate)} className="px-4 py-2 rounded-lg bg-amber-500 text-stone-950 font-bold flex gap-1">다음<ChevronRight className="w-4"/></button>}</div>
     </div>
   </div>
 }
+

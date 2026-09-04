@@ -1,7 +1,8 @@
 import type { AddictionTier } from '../types';
+import { getAdultMinPhysicalAge } from '../config/agePolicy';
 
 export const ADULT_SYSTEM_CONFIG = {
-  adultPhysicalAge: 18,
+  adultPhysicalAge: getAdultMinPhysicalAge(),
 
   // 정상 GM 스토리 로그 하나당 자연 증가
   naturalDesireGainPerStoryLog: 5,

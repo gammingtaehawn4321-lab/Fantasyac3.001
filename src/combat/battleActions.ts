@@ -41,7 +41,7 @@ export interface ActionExecutionResult {
 
 export interface SkillUsability {
   usable: boolean;
-  reason?: 'NOT_FOUND' | 'PASSIVE' | 'NOT_ENOUGH_COST' | 'COOLDOWN';
+  reason?: 'NOT_FOUND' | 'PASSIVE' | 'NOT_ENOUGH_COST' | 'COOLDOWN' | 'EQUIPMENT_REQUIRED';
   cost: number;
   cooldownRemaining: number;
   /** 암흑 룬워드 '공허 계약' 등으로 COST 부족분을 HP로 치를 때의 대가. */
@@ -88,6 +88,15 @@ export function getSkillUsability(actor: BattleActor, skillId: string): SkillUsa
   if (!skill) return { usable: false, reason: 'NOT_FOUND', cost: 0, cooldownRemaining: 0 };
   if (skill.type !== 'ACTIVE') {
     return { usable: false, reason: 'PASSIVE', cost: 0, cooldownRemaining: 0 };
+  }
+  if (skill.requiresMagicWeapon && !hasTrait(actor, 'EQUIP_MAGIC_WEAPON')) {
+    return { usable: false, reason: 'EQUIPMENT_REQUIRED', cost: 0, cooldownRemaining: 0 };
+  }
+  if (skill.requiresDualWield && !hasTrait(actor, 'EQUIP_DUAL_WIELD')) {
+    return { usable: false, reason: 'EQUIPMENT_REQUIRED', cost: 0, cooldownRemaining: 0 };
+  }
+  if (skill.requiredWeaponTags?.length && !skill.requiredWeaponTags.every((tag) => hasTrait(actor, `WEAPON_TAG:${tag}`))) {
+    return { usable: false, reason: 'EQUIPMENT_REQUIRED', cost: 0, cooldownRemaining: 0 };
   }
   const cost = getSkillCost(actor, skill);
   const cooldownRemaining = Math.max(0, actor.skillCooldowns?.[skill.id] ?? 0);
@@ -187,6 +196,7 @@ function addStatus(
   duration: number,
   value?: number
 ): void {
+  if (type === 'POISON' && target.statusEffects.some((effect) => effect.type === 'POISON_IMMUNE')) return;
   // 동일 종류의 단순 버프/디버프는 최신 효과로 갱신하여 무한 중첩을 방지한다.
   const refreshTypes: StatusEffectType[] = [
     'DEFEND', 'ATK_UP', 'MAGIC_ATK_UP', 'DEF_UP', 'PHYSICAL_DEF_UP', 'MAGIC_DEF_UP',
@@ -340,6 +350,12 @@ export function executeSkillAction(
     : undefined;
   const party = getParty(context, source, skill, targets);
   const opponents = getOpponents(context, targets);
+  const harmfulStatusTypes = new Set<StatusEffectType>(['BLEED','POISON','BURN','STUN','CHARM','FEAR','ACCURACY_DOWN','BLIND','SLOW','WEAKEN','VULNERABLE','TAUNT']);
+  const harmfulStatusIdsBefore = new Set(
+    opponents.flatMap((actor) => actor.statusEffects.filter((status) => harmfulStatusTypes.has(status.type)).map((status) => status.id))
+  );
+  let actionHadCrit = false;
+  let actionHadKill = false;
 
   // 비피해형 / 복합형 전용 효과
   switch (skill.effectId) {
@@ -423,33 +439,38 @@ export function executeSkillAction(
     case 'EFFECT_DIVINE_HEAL': {
       const prayer = source.equipmentRuntime?.counters?.prayer ?? 0;
       const heal = Math.round((35 + (source.stats.magicAttack ?? 10) * 1.6) * (hasTrait(source,'SET_LAST_SANCTUARY_3') ? 1 + prayer*0.08 : 1));
-      const target = targets[0] || source;
-      const before = target.hp;
-      const missing = Math.max(0, target.maxHp - before);
-      target.hp = Math.min(target.maxHp, target.hp + heal);
-      const actual = target.hp - before;
-      const overheal = Math.max(0, heal - missing);
+      const healTargets = skill.targetType === 'ALL_ALLIES' ? (targets.length > 0 ? targets : [source]) : [targets[0] || source];
+      let hadStigmataOverheal = false;
+      for (const target of healTargets) {
+        if (target.hp <= 0) continue;
+        const before = target.hp;
+        const missing = Math.max(0, target.maxHp - before);
+        target.hp = Math.min(target.maxHp, target.hp + heal);
+        const actual = target.hp - before;
+        const overheal = Math.max(0, heal - missing);
+        if (hasTrait(source, 'RUNE_RADIANCE_24') && overheal > 0) {
+          target.statusEffects.push({ id:`radiance_overheal_${Date.now()}_${target.id}`, type:'SHIELD', name:'넘치는 광휘', duration:2, value:Math.max(1, Math.round(overheal * 0.6)), sourceActorId:source.id, skipNextDurationTick:source.id===target.id });
+        }
+        if ((hasTrait(source, 'SET_DAWN_PRIEST_3') || hasTrait(source, 'MUT_DIVINE_HEAL_STIGMATA')) && overheal > 0) {
+          target.statusEffects.push({ id:`overheal_shield_${Date.now()}_${target.id}`, type:'SHIELD', name:'넘친 기도', duration:2, value:Math.max(1, Math.round(overheal * (hasTrait(source,'MUT_DIVINE_HEAL_STIGMATA') ? 1.25 : 0.75))), sourceActorId:source.id, skipNextDurationTick:source.id===target.id });
+          ensureEquipmentRuntime(target).links['dawn_priest_source'] = source.id;
+          hadStigmataOverheal = true;
+        }
+        if (source.traits.includes('TALENT_HEAL_SHIELD') && actual > 0) {
+          target.statusEffects.push({
+            id: `shield_${Date.now()}_${target.id}`,
+            type: 'SHIELD',
+            name: '신성 보호막',
+            duration: 2,
+            value: Math.max(1, Math.round(actual * 0.5)),
+            sourceActorId: source.id,
+            skipNextDurationTick: source.id === target.id,
+          });
+        }
+        logs.push(createLog(source, turnNumber, `성스러운 빛이 ${target.name}의 상처를 회복시켰다.`, { text: `HP +${actual}`, type: 'heal' }, speechLine));
+      }
       if (hasTrait(source, 'SET_DAWN_PRIEST_2')) source.cost = Math.min(source.maxCost, source.cost + 1);
-      if (hasTrait(source, 'RUNE_RADIANCE_24') && overheal > 0) {
-        target.statusEffects.push({ id:`radiance_overheal_${Date.now()}`, type:'SHIELD', name:'넘치는 광휘', duration:2, value:Math.max(1, Math.round(overheal * 0.6)), sourceActorId:source.id, skipNextDurationTick:source.id===target.id });
-      }
-      if ((hasTrait(source, 'SET_DAWN_PRIEST_3') || hasTrait(source, 'MUT_DIVINE_HEAL_STIGMATA')) && overheal > 0) {
-        target.statusEffects.push({ id:`overheal_shield_${Date.now()}`, type:'SHIELD', name:'넘친 기도', duration:2, value:Math.max(1, Math.round(overheal * (hasTrait(source,'MUT_DIVINE_HEAL_STIGMATA') ? 1.25 : 0.75))), sourceActorId:source.id, skipNextDurationTick:source.id===target.id });
-        ensureEquipmentRuntime(target).links['dawn_priest_source'] = source.id;
-        if (hasTrait(source, 'MUT_DIVINE_HEAL_STIGMATA')) source.cost = Math.min(source.maxCost, source.cost + 2);
-      }
-      if (source.traits.includes('TALENT_HEAL_SHIELD')) {
-        target.statusEffects.push({
-          id: `shield_${Date.now()}`,
-          type: 'SHIELD',
-          name: '신성 보호막',
-          duration: 2,
-          value: Math.round(actual * 0.5),
-          sourceActorId: source.id,
-          skipNextDurationTick: source.id === target.id,
-        });
-      }
-      logs.push(createLog(source, turnNumber, `성스러운 빛이 ${target.name}의 상처를 회복시켰다.`, { text: `HP +${actual}`, type: 'heal' }, speechLine));
+      if (hadStigmataOverheal && hasTrait(source, 'MUT_DIVINE_HEAL_STIGMATA')) source.cost = Math.min(source.maxCost, source.cost + 2);
       break;
     }
 
@@ -512,18 +533,22 @@ export function executeSkillAction(
     }
 
     case 'EFFECT_SACRED_SHIELD': {
-      const shield = Math.round(source.maxHp * 0.25 + source.stats.magicAttack * 0.5);
-      source.statusEffects.push({
-        id: `shield_${Date.now()}`,
-        type: 'SHIELD',
-        name: '수호의 축복',
-        duration: 3,
-        value: shield,
-        sourceActorId: source.id,
-        skipNextDurationTick: true,
-      });
-      addStatus(source, source, 'DEF_UP', '수호의 축복', 3, 25);
-      logs.push(createLog(source, turnNumber, `${source.name}을(를) 신성한 방벽이 감쌌다.`, { text: `보호막 +${shield} · 방어 +25%`, type: 'buff' }, speechLine));
+      const shieldTargets = skill.targetType === 'ALL_ALLIES' ? (targets.length > 0 ? targets : [source]) : [targets[0] || source];
+      for (const target of shieldTargets) {
+        if (target.hp <= 0) continue;
+        const shield = Math.max(1, Math.round(target.maxHp * 0.25 + source.stats.magicAttack * 0.5));
+        target.statusEffects.push({
+          id: `shield_${Date.now()}_${target.id}`,
+          type: 'SHIELD',
+          name: '수호의 축복',
+          duration: 3,
+          value: shield,
+          sourceActorId: source.id,
+          skipNextDurationTick: source.id === target.id,
+        });
+        addStatus(source, target, 'DEF_UP', '수호의 축복', 3, 25);
+        logs.push(createLog(source, turnNumber, `${target.name}을(를) 신성한 방벽이 감쌌다.`, { text: `보호막 +${shield} · 방어 +25%`, type: 'buff' }, speechLine));
+      }
       break;
     }
 
@@ -754,6 +779,7 @@ export function executeSkillAction(
       const equipmentLogs = onEquipmentDamageOutcome(source, target, skill, result, context?.battleState);
       for (const text of equipmentLogs) logs.push(createLog(source, turnNumber, text, { text: '장비 효과', type: 'buff' }));
       if (!result.isHit) continue;
+      if (result.isCrit) actionHadCrit = true;
       if (runtimeMods.targetGaugePush) target.actionGauge += runtimeMods.targetGaugePush;
 
       // 용족 심화 전직 전용 자원. UI에는 한국어 자원명만 노출한다.
@@ -789,6 +815,18 @@ export function executeSkillAction(
           target.statusEffects.push({ id:`last_sanctuary_${Date.now()}`, type:'SHIELD', name:'최후성역', duration:2, value:Math.max(1, Math.round(target.maxHp*0.2)), sourceActorId:savior.id });
           savior.consumedBattleEffects = [...(savior.consumedBattleEffects || []), 'last_sanctuary_save'];
           logs.push(createLog(savior, turnNumber, `${savior.name}의 최후성역이 ${target.name}의 치명상을 기적으로 붙들었다.`, { text: 'HP 1 생존 · 성역', type: 'heal' }));
+        }
+      }
+
+      if (target.hp <= 0) actionHadKill = true;
+
+      // 방어 반격: 방어 태세에서 실제 피해를 받았고 생존했을 때 즉시 80% 물리 반격.
+      if (result.finalDamage > 0 && target.hp > 0 && source.hp > 0 && hasTrait(target, 'TALENT_WARRIOR_COUNTER') && target.statusEffects.some((status) => status.type === 'DEFEND')) {
+        const counterSkill = getSkillDefinition('basic_attack')!;
+        const counter = applyDamage(target, source, counterSkill, turnNumber, undefined, { damageType:'PHYSICAL', multiplier:0.8, alwaysHit:true });
+        logs.push(createLog(target, turnNumber, `${target.name}이(가) 방어 태세에서 즉시 반격했다.`, { text: counter.result.isHit ? `반격 -${counter.result.finalDamage}` : '반격 무효', type: counter.result.isCrit ? 'crit' : 'damage' }));
+        for (const text of onEquipmentDamageOutcome(target, source, counterSkill, counter.result, context?.battleState)) {
+          logs.push(createLog(target, turnNumber, text, { text:'특성 효과', type:'buff' }));
         }
       }
 
@@ -895,6 +933,41 @@ export function executeSkillAction(
   } else if (logs.length === 0) {
     // 데이터가 존재하지만 아직 전용 수치효과가 없는 비피해형 스킬도 자기 자신을 공격하지 않는다.
     logs.push(createLog(source, turnNumber, `${source.name}(이)가 ${skillLabel}을(를) 사용했다.`, { text: '효과 적용', type: 'info' }, speechLine));
+  }
+
+  // 절정의 카니발: 이번 행동에서 적에게 새 매혹/상태이상을 실제로 부여했을 때 아군 전체 강화.
+  if (hasTrait(source, 'TALENT_CLIMAX_CARNIVAL')) {
+    const appliedOffensiveStatus = opponents.some((actor) =>
+      actor.statusEffects.some((status) => harmfulStatusTypes.has(status.type) && status.sourceActorId === source.id && !harmfulStatusIdsBefore.has(status.id))
+    );
+    if (appliedOffensiveStatus) {
+      for (const ally of party.filter((actor) => actor.hp > 0)) {
+        addStatus(source, ally, 'ATK_UP', '절정의 카니발', 3, 25);
+        addStatus(source, ally, 'EVASION_UP', '절정의 카니발', 3, 25);
+      }
+      logs.push(createLog(source, turnNumber, `${source.name}의 카니발이 상태이상 적중에 호응해 아군 전체를 고양시켰다.`, { text:'아군 공격/회피 +25% · 3턴', type:'buff' }));
+    }
+  }
+
+  const performTalentExtraStrike = (label: string, multiplier = 1) => {
+    if (source.hp <= 0) return;
+    const extraTarget = targets.find((actor) => actor.hp > 0) || opponents.find((actor) => actor.hp > 0);
+    if (!extraTarget) return;
+    const basic = getSkillDefinition('basic_attack')!;
+    const extra = applyDamage(source, extraTarget, basic, turnNumber, undefined, { damageType:'PHYSICAL', multiplier });
+    logs.push(createLog(source, turnNumber, `${source.name}의 ${label}이(가) ${extraTarget.name}에게 이어졌다.`, { text: extra.result.isHit ? `${label} -${extra.result.finalDamage}` : `${label} 빗나감`, type: extra.result.isCrit ? 'crit' : extra.result.isHit ? 'damage' : 'miss' }));
+    for (const text of onEquipmentDamageOutcome(source, extraTarget, basic, extra.result, context?.battleState)) {
+      logs.push(createLog(source, turnNumber, text, { text:'특성 효과', type:'buff' }));
+    }
+  };
+
+  // 연사 극의는 처치/치명타가 있었던 원래 행동에서 50% 확률로 단 한 번 추가 사격한다.
+  if (skill.damageMultiplier != null && hasTrait(source, 'TALENT_ARROW_FRENZY') && (actionHadCrit || actionHadKill) && Math.random() < 0.5) {
+    performTalentExtraStrike('추가 사격', 1);
+  }
+  // 차크람 곡예는 실제 쌍수 세팅에서 공격 행동마다 30% 확률로 추가 연격한다.
+  if (skill.damageMultiplier != null && hasTrait(source, 'TALENT_CHAKRAM_FLOW_DUAL_ACTIVE') && Math.random() < 0.3) {
+    performTalentExtraStrike('추가 연격', 1);
   }
 
   if (getDragonSovereignBranch(source) === 'INFERNO' && skill.damageMultiplier != null && !isDragonEmperorFormActive(source)) {

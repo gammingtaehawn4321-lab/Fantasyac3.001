@@ -48,7 +48,12 @@ export function chooseBasicClass(state:PlayerState,classId:Exclude<CombatClassTy
 }
 
 export function chooseAdvancedClass(state:PlayerState,evolutionId:string):{nextState:PlayerState;message:string} {
-  let s=ensureProgressionState(state); if(s.level<20) return {nextState:s,message:'Lv.20부터 심화 전직할 수 있습니다.'}; if(!s.skillProgression.advancedClassQuestCompleted) return {nextState:s,message:'심화 전직 퀘스트를 먼저 완료해야 합니다.'}; const cls=s.combatClass&&COMBAT_CLASSES[s.combatClass]; if(!cls) return {nextState:s,message:'기본 전직이 필요합니다.'}; const evo=cls.evolutions.find(e=>e.id===evolutionId); if(!evo)return{nextState:s,message:'선택할 수 없는 심화 전직입니다.'};
+  let s=ensureProgressionState(state); if(s.level<20) return {nextState:s,message:'Lv.20부터 심화 전직할 수 있습니다.'}; if(!s.skillProgression.advancedClassQuestCompleted) return {nextState:s,message:'심화 전직 퀘스트를 먼저 완료해야 합니다.'};
+  if(s.skillProgression.advancedClassChosen || (s.classEvolutionTier||1)>=2) {
+    if(s.classEvolutionId===evolutionId) return {nextState:s,message:'이미 해당 심화 전직을 완료했습니다.'};
+    return {nextState:s,message:'심화 전직은 한 번만 선택할 수 있습니다.'};
+  }
+  const cls=s.combatClass&&COMBAT_CLASSES[s.combatClass]; if(!cls) return {nextState:s,message:'기본 전직이 필요합니다.'}; const evo=cls.evolutions.find(e=>e.id===evolutionId); if(!evo)return{nextState:s,message:'선택할 수 없는 심화 전직입니다.'};
   const learnedSkills=Array.from(new Set([...(s.learnedSkills||[]),...(evo.grantedSkillIds||[])]));
   const skillProgress={...s.skillProgression.skillProgress};
   for(const skillId of evo.grantedSkillIds||[]){
@@ -63,7 +68,9 @@ export function addSkillMastery(state:PlayerState,skillId:string,amount=1):Playe
 }
 
 export function unlockAdvancedActive(state:PlayerState,skillId:string):{nextState:PlayerState;message:string} {
-  const s=ensureProgressionState(state); const classId=s.combatClass; const tree=classId?CLASS_SKILL_TREES[classId]||[]:[]; const node=tree.find(n=>n.refId===skillId&&n.kind==='ACTIVE'&&n.grade==='ADVANCED'); if(!node)return{nextState:s,message:'해당 심화 액티브 노드를 찾을 수 없습니다.'}; const req=node.requiresSkillLevel; if(req&&(s.skillProgression.skillProgress[req.skillId]?.level||0)<req.level)return{nextState:s,message:`선행 스킬 ${getSkillDefinition(req.skillId)?.name||req.skillId} Lv.${req.level}가 필요합니다.`};
+  const s=ensureProgressionState(state); const classId=s.combatClass; const tree=classId?CLASS_SKILL_TREES[classId]||[]:[]; const node=tree.find(n=>n.refId===skillId&&n.kind==='ACTIVE'&&n.grade==='ADVANCED'); if(!node)return{nextState:s,message:'해당 심화 액티브 노드를 찾을 수 없습니다.'};
+  if(node.requiresAdvancedClass && !s.skillProgression.advancedClassChosen && (s.classEvolutionTier||1)<2) return {nextState:s,message:'심화 전직을 완료해야 이 액티브를 습득할 수 있습니다.'};
+  const req=node.requiresSkillLevel; if(req&&(s.skillProgression.skillProgress[req.skillId]?.level||0)<req.level)return{nextState:s,message:`선행 스킬 ${getSkillDefinition(req.skillId)?.name||req.skillId} Lv.${req.level}가 필요합니다.`};
   const learned=Array.from(new Set([...(s.learnedSkills||[]),skillId])); return{nextState:{...s,learnedSkills:learned,skillProgression:{...s.skillProgression,skillProgress:{...s.skillProgression.skillProgress,[skillId]:{skillId,level:1,exp:0,unlocked:true}},unlockedTreeNodeIds:Array.from(new Set([...s.skillProgression.unlockedTreeNodeIds,node.id]))}},message:`심화 액티브 ${getSkillDefinition(skillId)?.name||skillId} 습득.`};
 }
 
@@ -74,11 +81,13 @@ export function rollPassiveAwakening(state:PlayerState,roll01=Math.random()):{ne
 export function learnPassiveRecipe(state:PlayerState,recipeId:string):PlayerState { const s=ensureProgressionState(state); if(!PASSIVE_RECIPE_DEFINITIONS[recipeId])return s; return{...s,skillProgression:{...s.skillProgression,knownPassiveRecipeIds:Array.from(new Set([...s.skillProgression.knownPassiveRecipeIds,recipeId]))}}; }
 
 export function craftAdvancedPassive(state:PlayerState,recipeId:string):{nextState:PlayerState;message:string} {
-  let s=ensureProgressionState(state); const recipe=PASSIVE_RECIPE_DEFINITIONS[recipeId]; if(!recipe||recipe.grade!=='ADVANCED')return{nextState:s,message:'유효한 심화 패시브 조합식이 아닙니다.'}; if(!s.skillProgression.knownPassiveRecipeIds.includes(recipeId))return{nextState:s,message:'해당 조합식을 아직 획득하지 못했습니다.'}; const pass={...s.skillProgression.passiveProgress}; for(const req of recipe.requiredBaseCopies){const p=pass[req.passiveId];if(!p||p.copies<req.copies)return{nextState:s,message:`${PASSIVE_DEFINITIONS_V1[req.passiveId]?.name||req.passiveId} 중복본 ${req.copies}개가 필요합니다.`};}
+  let s=ensureProgressionState(state); const recipe=PASSIVE_RECIPE_DEFINITIONS[recipeId]; if(!recipe||recipe.grade!=='ADVANCED')return{nextState:s,message:'유효한 심화 패시브 조합식이 아닙니다.'};
+  if(!s.skillProgression.advancedClassChosen && (s.classEvolutionTier||1)<2) return {nextState:s,message:'심화 전직을 완료해야 심화 패시브를 합성할 수 있습니다.'};
+  if(!s.skillProgression.knownPassiveRecipeIds.includes(recipeId))return{nextState:s,message:'해당 조합식을 아직 획득하지 못했습니다.'}; const pass={...s.skillProgression.passiveProgress}; for(const req of recipe.requiredBaseCopies){const p=pass[req.passiveId];if(!p||p.copies<req.copies)return{nextState:s,message:`${PASSIVE_DEFINITIONS_V1[req.passiveId]?.name||req.passiveId} 중복본 ${req.copies}개가 필요합니다.`};}
   recipe.requiredBaseCopies.forEach(req=>pass[req.passiveId]={...pass[req.passiveId],copies:pass[req.passiveId].copies-req.copies}); const prev=pass[recipe.resultPassiveId]||{passiveId:recipe.resultPassiveId,grade:'ADVANCED',level:0,copies:0,unlocked:true}; pass[recipe.resultPassiveId]={...prev,level:Math.min(20,prev.level+1),unlocked:true}; s={...s,skillProgression:{...s.skillProgression,passiveProgress:pass}}; return{nextState:s,message:`${PASSIVE_DEFINITIONS_V1[recipe.resultPassiveId]?.name} 합성 → Lv.${pass[recipe.resultPassiveId].level}`};
 }
 
-export function canUnlockUniquePassiveRecipe(state:PlayerState):boolean { const s=ensureProgressionState(state); const ids=getAdvancedPassiveIds(s.combatClass||''); return ids.length>0&&ids.every(id=>(s.skillProgression.passiveProgress[id]?.level||0)>=20); }
+export function canUnlockUniquePassiveRecipe(state:PlayerState):boolean { const s=ensureProgressionState(state); if(!s.skillProgression.advancedClassChosen && (s.classEvolutionTier||1)<2) return false; const ids=getAdvancedPassiveIds(s.combatClass||''); return ids.length>0&&ids.every(id=>(s.skillProgression.passiveProgress[id]?.level||0)>=20); }
 
 export function craftUniquePassive(state:PlayerState,roll01=Math.random()):{nextState:PlayerState;message:string;success:boolean} {
   let s=ensureProgressionState(state); if(!canUnlockUniquePassiveRecipe(s))return{nextState:s,message:'모든 심화 패시브를 Lv.20까지 성장시켜야 합니다.',success:false}; const uid=getUniquePassiveId(s.combatClass||''); if(!uid)return{nextState:s,message:'유일 패시브가 없습니다.',success:false}; if(s.skillProgression.acquiredUniquePassiveIds.includes(uid))return{nextState:s,message:'이미 유일 패시브를 완성했습니다.',success:true}; const pity=s.skillProgression.uniquePassivePity||0; const chance=Math.min(.35,.03+pity*.02+s.skillProgression.uniquePassiveResidue*.005); const success=roll01<chance||pity>=15; if(success){const pass={...s.skillProgression.passiveProgress,[uid]:{passiveId:uid,grade:'UNIQUE' as const,level:1,copies:0,unlocked:true}}; s={...s,skillProgression:{...s.skillProgression,passiveProgress:pass,acquiredUniquePassiveIds:[...s.skillProgression.acquiredUniquePassiveIds,uid],uniquePassivePity:0}};return{nextState:s,message:`유일 패시브 『${PASSIVE_DEFINITIONS_V1[uid]?.name}』 합성 성공!`,success:true};}
@@ -101,6 +110,7 @@ export function grantUniqueActive(state:PlayerState,skillId:string):{nextState:P
   const s=ensureProgressionState(state); const classId=s.combatClass||'';
   const node=(CLASS_SKILL_TREES[classId]||[]).find(n=>n.kind==='ACTIVE'&&n.grade==='UNIQUE'&&n.refId===skillId);
   if(!node)return{nextState:s,message:'현재 직업의 유일 액티브가 아닙니다.',success:false};
+  if(node.requiresAdvancedClass && !s.skillProgression.advancedClassChosen && (s.classEvolutionTier||1)<2) return {nextState:s,message:'심화 전직을 완료해야 유일 액티브를 획득할 수 있습니다.',success:false};
   if(s.skillProgression.acquiredUniqueActiveIds.includes(skillId))return{nextState:s,message:'이미 획득한 유일 액티브입니다.',success:true};
   return {nextState:{...s,learnedSkills:Array.from(new Set([...(s.learnedSkills||[]),skillId])),skillProgression:{...s.skillProgression,acquiredUniqueActiveIds:[...s.skillProgression.acquiredUniqueActiveIds,skillId],skillProgress:{...s.skillProgression.skillProgress,[skillId]:{skillId,level:1,exp:0,unlocked:true}},unlockedTreeNodeIds:Array.from(new Set([...s.skillProgression.unlockedTreeNodeIds,node.id]))}},message:`유일 액티브 ${getSkillDefinition(skillId)?.name||skillId} 획득.`,success:true};
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import IllustrationImage from './IllustrationImage';
 import {
   X,
   Backpack,
@@ -22,7 +23,7 @@ import {
   BAG_TYPE_KOREAN,
   BAG_RARITY_KOREAN,
 } from '../data/bags';
-import { getItemDefinition } from '../data/items/itemDatabase';
+import { getItemDefinition, inferItemMetadata, inferUsageHint } from '../data/items/itemDatabase';
 import { EQUIPMENT_DATABASE } from '../data/equipment/equipmentDatabase';
 import { ItemDetailModal } from './ItemDetailModal';
 
@@ -34,6 +35,7 @@ export type ItemFilterCategory =
   | 'BAG'
   | 'KEY'
   | 'QUEST'
+  | 'MAP'
   | 'TOOL'
   | 'BOOK'
   | 'MISC';
@@ -51,6 +53,7 @@ const FILTER_OPTIONS: FilterOption[] = [
   { id: 'BAG', label: '가방' },
   { id: 'KEY', label: '열쇠' },
   { id: 'QUEST', label: '퀘스트' },
+  { id: 'MAP', label: '지도' },
   { id: 'TOOL', label: '도구' },
   { id: 'BOOK', label: '책' },
   { id: 'MISC', label: '기타' },
@@ -77,6 +80,7 @@ function getItemFilterCategory(item: InventoryItem): ItemFilterCategory {
   if (rawCat === 'EQUIPMENT') return 'EQUIPMENT';
   if (rawCat === 'KEY') return 'KEY';
   if (rawCat === 'QUEST') return 'QUEST';
+  if (rawCat === 'MAP') return 'MAP';
   if (rawCat === 'TOOL') return 'TOOL';
   if (rawCat === 'BOOK' || rawCat === 'DOCUMENT') return 'BOOK';
   if (rawCat === 'MISC' || rawCat === 'GIFT' || rawCat === 'VALUABLE') return 'MISC';
@@ -87,7 +91,8 @@ function getItemFilterCategory(item: InventoryItem): ItemFilterCategory {
   if (name.includes('주괴') || name.includes('광석') || name.includes('원석') || name.includes('가죽') || name.includes('목재') || name.includes('약초') || name.includes('뼈') || name.includes('결정')) return 'MATERIAL';
   if (name.includes('검') || name.includes('도끼') || name.includes('창') || name.includes('방패') || name.includes('갑옷') || name.includes('투구') || name.includes('신발') || name.includes('장갑') || name.includes('망토') || name.includes('반지') || name.includes('목걸이') || name.includes('지팡이') || name.includes('활')) return 'EQUIPMENT';
   if (name.includes('열쇠') || name.includes('인장')) return 'KEY';
-  if (name.includes('퀘스트') || name.includes('단서') || name.includes('의뢰서') || name.includes('징표')) return 'QUEST';
+  if (name.includes('퀘스트') || name.includes('단서') || name.includes('의뢰서') || name.includes('징표') || name.includes('증표')) return 'QUEST';
+  if (name.includes('지도') || name.includes('해도') || name.includes('항로도')) return 'MAP';
   if (name.includes('밧줄') || name.includes('삽') || name.includes('횃불') || name.includes('곡괭이') || name.includes('낚싯대')) return 'TOOL';
   if (name.includes('책') || name.includes('서적') || name.includes('일지') || name.includes('고서') || name.includes('마도서') || name.includes('비전서')) return 'BOOK';
   return 'MISC';
@@ -154,15 +159,17 @@ export function InventoryModal({
   const preview = useMemo(() => {
     if (!selectedItem) return null;
     const itemDef = getItemDefinition(selectedItem.id || selectedItem.name);
+    const inferredMeta = inferItemMetadata(selectedItem.id || selectedItem.name, selectedItem.description);
     const equipId = selectedItem.equipmentId || (selectedItem.id && EQUIPMENT_DATABASE[selectedItem.id] ? selectedItem.id : undefined);
     const equipDef = equipId ? EQUIPMENT_DATABASE[equipId] : undefined;
     const bagDef = getBagDefinition(selectedItem.bagId || selectedItem.id || selectedItem.name);
     const category = getItemFilterCategory(selectedItem);
     const categoryLabel = FILTER_OPTIONS.find((opt) => opt.id === category)?.label || '기타';
     const illustrationUrl = selectedItem.illustrationUrl || itemDef?.illustrationUrl || equipDef?.illustrationUrl || bagDef?.illustrationUrl || '';
-    const description = selectedItem.description || itemDef?.description || equipDef?.description || bagDef?.description || '아이템에 대한 상세 설명이 없습니다.';
+    const description = selectedItem.description || itemDef?.description || equipDef?.description || bagDef?.description || inferredMeta.description;
     const flavorText = selectedItem.flavorText || itemDef?.flavorText || equipDef?.flavorText || bagDef?.flavorText || '';
-    return { itemDef, equipDef, bagDef, categoryLabel, illustrationUrl, description, flavorText };
+    const usageHint = itemDef?.usageHint || (bagDef ? `사용처: 가방 슬롯에 장착하여 소지 무게 한도를 +${bagDef.bonusCarryWeight}kg 확장합니다.` : inferUsageHint(selectedItem.name, inferredMeta.category, itemDef?.uses));
+    return { itemDef, equipDef, bagDef, categoryLabel, illustrationUrl, description, flavorText, usageHint };
   }, [selectedItem]);
 
   if (!isOpen) return null;
@@ -261,13 +268,13 @@ export function InventoryModal({
                     >
                       <div className="w-10 h-10 rounded-lg bg-stone-950 border border-stone-800 flex items-center justify-center overflow-hidden shrink-0">
                         {(item.illustrationUrl || itemDef?.illustrationUrl) ? (
-                          <img src={item.illustrationUrl || itemDef?.illustrationUrl} alt="" className="w-full h-full object-contain" />
+                          <IllustrationImage src={item.illustrationUrl || itemDef?.illustrationUrl} alt="" className="w-full h-full object-contain" />
                         ) : <Package className="w-4 h-4 text-stone-600" />}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5"><span className="text-xs font-semibold text-stone-200 truncate">{item.name}</span><span className="text-[10px] font-mono text-amber-400">×{item.quantity}</span></div>
                         <div className="text-[10px] text-stone-500 mt-0.5">개당 {singleWeight.toFixed(1)}kg · 총 {totalWeight.toFixed(1)}kg</div>
-                        {(item.description || itemDef?.description) && <div className="text-[10px] text-stone-500 mt-0.5 line-clamp-1">{item.description || itemDef?.description}</div>}
+                        <div className="text-[10px] text-stone-500 mt-0.5 line-clamp-1">{item.description || itemDef?.description || inferItemMetadata(item.id || item.name, item.description).description}</div>
                       </div>
                       <ChevronRight className="w-4 h-4 text-stone-700 group-hover:text-amber-400 shrink-0" />
                     </button>
@@ -282,7 +289,7 @@ export function InventoryModal({
               <div className="flex-1 overflow-y-auto custom-scrollbar p-4 lg:p-5 space-y-4">
                 <div className="aspect-[4/3] max-h-[34vh] rounded-xl bg-stone-950 border border-stone-800 flex items-center justify-center overflow-hidden p-2">
                   {preview.illustrationUrl ? (
-                    <img src={preview.illustrationUrl} alt={selectedItem.name} className="w-full h-full object-contain object-center" />
+                    <IllustrationImage src={preview.illustrationUrl} alt={selectedItem.name} className="w-full h-full object-contain object-center" />
                   ) : (
                     <div className="text-center text-stone-600"><ImageIcon className="w-9 h-9 mx-auto mb-2" /><span className="text-[10px]">아이템 삽화 영역</span></div>
                   )}
@@ -297,6 +304,7 @@ export function InventoryModal({
                 <div className="rounded-xl border border-stone-800 bg-stone-950/60 p-3">
                   <div className="flex items-center gap-1.5 text-[10px] font-semibold text-stone-400 mb-1.5"><Info className="w-3.5 h-3.5" />고유 설명</div>
                   <p className="text-xs leading-5 text-stone-300 whitespace-pre-wrap">{preview.description}</p>
+                  <p className="text-[11px] leading-5 text-sky-200/80 mt-2 border-t border-sky-900/30 pt-2"><span className="font-semibold text-sky-300">사용처</span> · {preview.usageHint.replace(/^사용처:\s*/, '')}</p>
                   {preview.flavorText && <p className="text-[11px] leading-5 text-amber-200/70 italic mt-2 border-t border-stone-800 pt-2">{preview.flavorText}</p>}
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-[10px]">

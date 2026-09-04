@@ -1,6 +1,8 @@
 import { QuestDefinition } from '../../types';
 import { GUIDE_QUESTS } from './guideQuestExpansion';
 import { CHARACTER_QUESTS_V205 } from './characterQuestExpansionV205';
+import { FATE_QUESTS } from './fateQuestDatabase';
+import { SETTLEMENT_BOARD_QUESTS } from '../world/settlements/settlementBoardQuests';
 
 const BASE_QUEST_DATABASE: Record<string, QuestDefinition> = {
   quest_class_basic: {
@@ -308,6 +310,62 @@ const BASE_QUEST_DATABASE: Record<string, QuestDefinition> = {
     },
   },
 
+
+  quest_miria_medicinal_herbs: {
+    id: 'quest_miria_medicinal_herbs',
+    title: '치유사의 약초 꾸러미',
+    category: 'CHARACTER',
+    giverNpcId: 'miria_beastkin_healer',
+    giverName: '상냥한 약초 치유사 미리아',
+    description: '미리아는 숲에서 다친 이들을 돌보기 위해 기본 약재가 더 필요합니다. 치유잎을 모아 그녀의 치료 준비를 도와주세요.',
+    summary: '치유잎을 확보하고 미리아에게 돌아가 약초 꾸러미를 완성하세요.',
+    stages: [
+      {
+        stageId: 1,
+        title: '치유잎 수집',
+        description: '숲과 들판에서 치료에 쓸 치유잎을 충분히 확보하세요.',
+        objectives: [
+          {
+            id: 'obj_miria_medicinal_leaf',
+            description: '치유잎 3개 보유하기',
+            type: 'POSSESS_ITEM',
+            targetId: 'medicinal_leaf',
+            targetName: '치유잎',
+            requiredCount: 3,
+            currentCount: 0,
+            isCompleted: false,
+          },
+        ],
+        nextStageId: 2,
+      },
+      {
+        stageId: 2,
+        title: '치유사에게 전달',
+        description: '미리아에게 돌아가 확보한 약재와 치료 준비를 확인하세요.',
+        objectives: [
+          {
+            id: 'obj_return_to_miria',
+            description: '미리아와 대화하기',
+            type: 'TALK_NPC',
+            targetId: 'miria_beastkin_healer',
+            targetName: '미리아',
+            requiredCount: 1,
+            currentCount: 0,
+            isCompleted: false,
+          },
+        ],
+      },
+    ],
+    rewards: {
+      exp: 220,
+      rupees: 120,
+      professionExp: { professionId: 'ALCHEMIST', exp: 120 },
+      characterRelationship: { characterId: 'miria_beastkin_healer', delta: 20 },
+      companionTrust: { companionId: 'companion_miria', delta: 15 },
+      items: [{ name: '작은 회복약', quantity: 2, quality: 'NORMAL' }],
+    },
+  },
+
   quest_bandit_canyon_negotiation: {
     id: 'quest_bandit_canyon_negotiation',
     title: '협곡의 도적단과 비밀 보물함',
@@ -405,7 +463,7 @@ const BASE_QUEST_DATABASE: Record<string, QuestDefinition> = {
   },
 };
 
-export const QUEST_DATABASE: Record<string, QuestDefinition> = { ...BASE_QUEST_DATABASE, ...GUIDE_QUESTS, ...CHARACTER_QUESTS_V205 };
+export const QUEST_DATABASE: Record<string, QuestDefinition> = { ...BASE_QUEST_DATABASE, ...GUIDE_QUESTS, ...CHARACTER_QUESTS_V205, ...FATE_QUESTS, ...SETTLEMENT_BOARD_QUESTS };
 
 export function getQuestDefinition(questId?: string): QuestDefinition | undefined {
   if (!questId) return undefined;

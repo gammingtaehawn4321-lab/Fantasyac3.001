@@ -1,5 +1,5 @@
 import type { PlayerState, WorldRegionId } from '../../types';
-import { DRAGONKIN_HUNTER_ENCOUNTER_REFERENCES } from './dragonkinNarrativeReferences';
+import { DRAGONKIN_HUNTER_ENCOUNTER_REFERENCES } from '../raceNarrativeReferences';
 
 export const DRAGONKIN_HUNTER_ENCOUNTER_IDS = Object.keys(DRAGONKIN_HUNTER_ENCOUNTER_REFERENCES);
 export const DRAGONKIN_HUNTER_MONSTER_IDS = [

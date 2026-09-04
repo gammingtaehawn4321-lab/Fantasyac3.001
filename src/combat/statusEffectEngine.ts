@@ -36,6 +36,7 @@ export function processTurnStartStatusEffects(actor: BattleActor): StatusTickRes
         break;
       }
       case 'POISON': {
+        if (actor.statusEffects.some((status) => status.type === 'POISON_IMMUNE')) break;
         const damage = Math.max(2, Math.round(effect.value ?? 6));
         hpDelta -= damage;
         logs.push(`[중독] ${actor.name}이(가) ${damage}의 지속 피해를 입었습니다.`);

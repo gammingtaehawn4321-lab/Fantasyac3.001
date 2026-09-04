@@ -148,7 +148,7 @@ export function StoryLog({
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUpOrLeave}
       onMouseLeave={handleMouseUpOrLeave}
-      className="flex-1 w-full min-h-0 overflow-y-auto overflow-x-hidden no-scrollbar px-4 py-5 sm:py-7 select-text cursor-grab active:cursor-grabbing touch-pan-y"
+      className="flex-1 w-full min-h-0 overflow-y-auto overflow-x-hidden no-scrollbar px-4 pt-5 pb-24 sm:pt-7 sm:pb-24 select-text cursor-grab active:cursor-grabbing touch-pan-y"
     >
       <div className="w-full max-w-2xl mx-auto space-y-5">
         {messages.map((msg, index) => (

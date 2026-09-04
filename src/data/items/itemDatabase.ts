@@ -1,15 +1,20 @@
 import { ItemDefinition } from '../../types';
 import { MONSTER_LOOT_ITEM_DATABASE } from '../world/monsterLootItems';
 import { LIFE_MATERIAL_ITEM_DATABASE, TRAVEL_TOOL_ITEM_DATABASE } from './lifeMaterialSystem';
+import { POTION_DATABASE } from '../potions/potionDatabase';
+import { DUNGEON_REWARD_ITEM_DATABASE } from './dungeonRewardItems';
+import { TECHNOLOGY_MATERIAL_ITEM_DATABASE } from './technologyMaterialItems';
 
 export const ITEM_DATABASE: Record<string, ItemDefinition> = {
   ...MONSTER_LOOT_ITEM_DATABASE,
+  ...DUNGEON_REWARD_ITEM_DATABASE,
+  ...TECHNOLOGY_MATERIAL_ITEM_DATABASE,
   ...LIFE_MATERIAL_ITEM_DATABASE,
   ...TRAVEL_TOOL_ITEM_DATABASE,
-  sky_navigation_map: { id:'sky_navigation_map', name:'하늘 지도', category:'TOOL', description:'스크로제 하늘층의 부유지와 알려진 항로를 기록한 지도.', flavorText:'세 명의 항법 상인 중 지도 상인이 취급한다.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.2, bulk:1, size:'SMALL', rarity:'RARE' },
+  sky_navigation_map: { id:'sky_navigation_map', name:'하늘 지도', category:'MAP', description:'스크로제 하늘층의 부유지와 알려진 항로를 기록한 지도.', usageHint:'하늘층 항법 도구 판정과 세계지도 탐색에 사용됩니다.', flavorText:'세 명의 항법 상인 중 지도 상인이 취급한다.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.2, bulk:1, size:'SMALL', rarity:'RARE' },
   sky_navigation_compass: { id:'sky_navigation_compass', name:'하늘 나침반', category:'TOOL', description:'고도와 바람의 흔들림 속에서도 하늘 방위를 잡는 특수 나침반.', flavorText:'세 명의 항법 상인 중 나침반 상인이 취급한다.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.3, bulk:1, size:'SMALL', rarity:'RARE' },
   sky_navigation_telescope: { id:'sky_navigation_telescope', name:'하늘 망원경', category:'TOOL', description:'구름 너머의 부유지와 항로 표식을 관측하는 망원경.', flavorText:'세 명의 항법 상인 중 망원경 상인이 취급한다.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.8, bulk:2, size:'MEDIUM', rarity:'RARE' },
-  celestial_navigation_map: { id:'celestial_navigation_map', name:'천공 지도', category:'TOOL', description:'천공층의 에도와, 이동도시 아벨라와 주요 기류를 기록한 희귀 지도.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.2, bulk:1, size:'SMALL', rarity:'EPIC' },
+  celestial_navigation_map: { id:'celestial_navigation_map', name:'천공 지도', category:'MAP', description:'천공층의 에도와, 이동도시 아벨라와 주요 기류를 기록한 희귀 지도.', usageHint:'천공층 항법 도구 판정과 세계지도 탐색에 사용됩니다.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.2, bulk:1, size:'SMALL', rarity:'EPIC' },
   celestial_navigation_compass: { id:'celestial_navigation_compass', name:'천공 나침반', category:'TOOL', description:'천공층의 변덕스러운 방향과 고도를 읽는 항법구.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.3, bulk:1, size:'SMALL', rarity:'EPIC' },
   celestial_navigation_telescope: { id:'celestial_navigation_telescope', name:'천공 망원경', category:'TOOL', description:'천공의 구름과 폭풍 너머 이동하는 섬과 도시를 찾는 장거리 망원경.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.9, bulk:2, size:'MEDIUM', rarity:'EPIC' },
   celestial_flight_permit: { id:'celestial_flight_permit', name:'구형 천공 비행 허가증', category:'KEY', description:'구 시스템의 천공 비행 허가증. 2.0부터 천공 이동의 핵심 수단은 플레이어가 직접 제작·운용하는 비행정이며, 이 허가증은 레거시/퀘스트 증표로만 남습니다.', usable:false, consumedOnUse:false, uses:['SPECIAL'], weight:0.01, bulk:0, size:'TINY', rarity:'EPIC' },
@@ -634,12 +639,52 @@ export const ITEM_DATABASE: Record<string, ItemDefinition> = {
   },
 };
 
+function potionToItemDefinition(potion: (typeof POTION_DATABASE)[string]): ItemDefinition {
+  const effect = potion.gameplayEffect || {};
+  const uses: ItemDefinition['uses'] = [];
+  if ((effect.hpDelta || 0) > 0 || (effect.hpPercent || 0) > 0 || effect.resurrectRatio) uses.push('HEAL');
+  if ((effect.mpDelta || 0) > 0) uses.push('MANA_RESTORE');
+  if ((effect.sanityDelta || 0) > 0) uses.push('SANITY_RESTORE');
+  if (effect.statBonus || effect.cleanseDebuffs || effect.detoxPoison || effect.cureDisease || effect.healBleeding || effect.durationMinutes || effect.durationTurns) uses.push('BUFF');
+  return {
+    id: potion.id,
+    name: potion.name,
+    category: 'CONSUMABLE',
+    description: potion.description,
+    flavorText: potion.drinkingPresentation,
+    usable: true,
+    consumedOnUse: true,
+    uses: uses.length ? Array.from(new Set(uses)) : ['SPECIAL'],
+    rarity: potion.rarity,
+    usageHint: `사용처: ${potion.categoryLabel} · ${potion.usableContext === 'COMBAT_ONLY' ? '전투 중 사용' : potion.usableContext === 'NON_COMBAT_ONLY' ? '비전투 중 사용' : '전투/비전투 사용'}${potion.restrictions ? ` · ${potion.restrictions}` : ''}`,
+    useEffect: {
+      hpDelta: effect.hpDelta,
+      mpDelta: effect.mpDelta,
+      sanityDelta: effect.sanityDelta,
+      buffName: effect.buffName,
+      message: potion.effectLogText,
+    },
+  };
+}
+
+function getPotionDefinitionAsItem(itemIdOrName: string): ItemDefinition | undefined {
+  const direct = POTION_DATABASE[itemIdOrName];
+  if (direct) return potionToItemDefinition(direct);
+  const lowered = itemIdOrName.trim().toLowerCase();
+  const byName = Object.values(POTION_DATABASE).find((potion) => potion.name.trim().toLowerCase() === lowered);
+  return byName ? potionToItemDefinition(byName) : undefined;
+}
+
 /**
  * itemId 또는 아이템 이름으로 ItemDefinition을 안전하게 조회합니다.
  */
 export function getItemDefinition(itemIdOrName?: string): ItemDefinition | undefined {
   if (!itemIdOrName) return undefined;
   const cleanKey = itemIdOrName.trim();
+
+  // 연금술 포션/비약은 별도 DB를 사용하지만 인벤토리/UI에서는 일반 ItemDefinition처럼 조회한다.
+  const potionItem = getPotionDefinitionAsItem(cleanKey);
+  if (potionItem) return potionItem;
 
   // 1. ID 직접 일치
   if (ITEM_DATABASE[cleanKey]) {
@@ -662,36 +707,86 @@ export function getItemDefinition(itemIdOrName?: string): ItemDefinition | undef
 /**
  * 인벤토리 아이템을 ItemDefinition과 매핑하여 풍부한 메타데이터를 보강합니다.
  */
-export function enrichInventoryItem(item: {
-  name: string;
-  quantity: number;
-  id?: string;
-  description?: string;
-  flavorText?: string;
-  illustrationUrl?: string;
-  equipmentId?: string;
-  bagId?: string;
-}): {
-  id: string;
-  name: string;
-  quantity: number;
+export interface InferredItemMetadata {
   category: ItemDefinition['category'];
   description: string;
-  flavorText?: string;
-  illustrationUrl?: string;
+  usageHint: string;
   usable: boolean;
-  itemDef?: ItemDefinition;
+}
+
+/**
+ * Gemini/퀘스트 보상으로 동적으로 생성된 아이템도 UI에서 정체와 용도를 잃지 않게 하는 공통 추론기.
+ * 정식 ItemDefinition이 있으면 언제나 그 정의가 우선한다.
+ */
+export function inferItemMetadata(itemIdOrName?: string, explicitDescription?: string): InferredItemMetadata {
+  const raw = String(itemIdOrName || '').trim();
+  const name = raw.toLowerCase();
+  const def = getItemDefinition(raw);
+  if (def) {
+    return {
+      category: def.category,
+      description: explicitDescription || def.description || `${def.name}에 관한 물품입니다.`,
+      usageHint: def.usageHint || inferUsageHint(def.name, def.category, def.uses),
+      usable: def.usable,
+    };
+  }
+
+  let category: ItemDefinition['category'] = 'MISC';
+  if (/퀘스트|의뢰서|단서|증표|징표|문장|계약서|허가증|임무/.test(raw)) category = 'QUEST';
+  else if (/보물지도|지도|해도|항로도/.test(raw)) category = 'MAP';
+  else if (/열쇠|인장|패스|통행증|허가증/.test(raw)) category = 'KEY';
+  else if (/책|서적|일지|고서|마도서|비전서|문서|양피지/.test(raw)) category = 'DOCUMENT';
+  else if (/약|포션|영약|엘릭서|허브차|성수|음식|빵|고기/.test(raw)) category = 'CONSUMABLE';
+  else if (/밧줄|삽|횃불|곡괭이|낚싯대|나침반|망원경|도구/.test(raw)) category = 'TOOL';
+  else if (/광석|주괴|원석|가죽|목재|약초|뼈|결정|파편|정수|재료/.test(raw)) category = 'MATERIAL';
+  else if (/검|도끼|창|방패|갑옷|투구|신발|장갑|망토|반지|목걸이|지팡이|활/.test(raw)) category = 'EQUIPMENT';
+  else if (/보석|유물|골동품|귀중품|은장도/.test(raw)) category = 'VALUABLE';
+
+  const label: Record<ItemDefinition['category'], string> = {
+    CONSUMABLE:'소모품', MATERIAL:'제작/채집 재료', EQUIPMENT:'장비', KEY:'잠금·통행용 중요 물품', QUEST:'퀘스트 중요 물품', MAP:'탐험 지도', TOOL:'탐험 도구', BOOK:'서적', DOCUMENT:'문서/기록', GIFT:'선물', VALUABLE:'귀중품', MISC:'모험 물품'
+  };
+  const desc = explicitDescription?.trim() || `${raw || '이 물품'}은(는) 모험 중 획득한 ${label[category]}입니다. 세부 용도는 아래 사용처 안내를 따릅니다.`;
+  const inferredUsable = ['CONSUMABLE', 'MAP', 'TOOL', 'BOOK', 'DOCUMENT', 'GIFT'].includes(String(category));
+  return { category, description: desc, usageHint: inferUsageHint(raw, category), usable: inferredUsable };
+}
+
+export function inferUsageHint(name: string, category: ItemDefinition['category'], uses?: ItemDefinition['uses']): string {
+  if (uses?.length) {
+    const useLabels: Record<string,string> = { HEAL:'체력 회복', MANA_RESTORE:'마나 회복', SANITY_RESTORE:'정신력 회복', CLIMB_CLIFF:'절벽/험지 이동', EXCAVATE:'발굴', LIGHT_AREA:'어두운 지역 탐색', READ:'읽기', GIFT:'주요 인물에게 선물', UNLOCK_LOCK:'잠금 해제', BUFF:'일시 효과', CRAFT:'제작', SPECIAL:'특수 인카운터/탐험' };
+    return `사용처: ${uses.map(u=>useLabels[u] || u).join(' · ')}`;
+  }
+  switch (category) {
+    case 'QUEST': return '사용처: 관련 퀘스트의 조건·제출·진행 판정에 사용됩니다. 함부로 버리지 않는 것이 좋습니다.';
+    case 'MAP': return '사용처: 읽으면 현재 주변의 세계지도 탐색 정보를 넓히며, 보물/항로 관련 인카운터의 단서로 사용됩니다.';
+    case 'KEY': return '사용처: 대응하는 문·상자·봉인·통행 조건의 잠금 해제에 사용됩니다.';
+    case 'MATERIAL': return '사용처: 제작, 강화, 생활 직업 또는 관련 의뢰 재료로 사용됩니다.';
+    case 'EQUIPMENT': return '사용처: 장비 또는 가방 슬롯에 장착하여 능력/적재 효과를 적용합니다.';
+    case 'CONSUMABLE': return '사용처: 인벤토리에서 사용하여 회복·버프 등 해당 아이템 효과를 발동합니다.';
+    case 'TOOL': return '사용처: 탐험·채집·이동·특수 인카운터의 도구 판정에 사용됩니다.';
+    case 'BOOK': case 'DOCUMENT': return '사용처: 읽어서 지식·단서·퀘스트 진행 정보를 확인하는 데 사용됩니다.';
+    case 'GIFT': return '사용처: 만난 주요 인물에게 선물하여 관계 변화에 활용할 수 있습니다.';
+    case 'VALUABLE': return '사용처: 판매, 거래 또는 특정 의뢰/수집 조건에 활용할 수 있는 귀중품입니다.';
+    default: return `사용처: ${name || '이 물품'}과 관련된 인카운터·거래·퀘스트에서 소지 여부가 참조됩니다.`;
+  }
+}
+
+export function enrichInventoryItem(item: {
+  name: string; quantity: number; id?: string; description?: string; flavorText?: string; illustrationUrl?: string; equipmentId?: string; bagId?: string;
+}): {
+  id: string; name: string; quantity: number; category: ItemDefinition['category']; description: string; usageHint: string; flavorText?: string; illustrationUrl?: string; usable: boolean; itemDef?: ItemDefinition;
 } {
   const def = getItemDefinition(item.id || item.name);
+  const inferred = inferItemMetadata(item.id || item.name, item.description);
   return {
     id: def ? def.id : item.id || item.name,
     name: item.name,
     quantity: item.quantity,
-    category: def ? def.category : 'MISC',
-    description: item.description || (def ? def.description : ''),
-    flavorText: item.flavorText || (def ? def.flavorText : undefined),
-    illustrationUrl: item.illustrationUrl || (def ? def.illustrationUrl : undefined),
-    usable: def ? def.usable : false,
+    category: def?.category || inferred.category,
+    description: item.description || def?.description || inferred.description,
+    usageHint: def?.usageHint || inferred.usageHint,
+    flavorText: item.flavorText || def?.flavorText,
+    illustrationUrl: item.illustrationUrl || def?.illustrationUrl,
+    usable: def?.usable ?? inferred.usable,
     itemDef: def,
   };
 }

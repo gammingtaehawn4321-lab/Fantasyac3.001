@@ -1,13 +1,12 @@
 import type {
   BodyCompartmentId,
   BodyLoadStage,
-  BodyPayloadChannel,
   BodyPayloadEntry,
   BodyPayloadKind,
 } from '../types';
 import {
-  getBodyPayloadChannelDisplay,
-  resolveBodyPayloadChannel,
+  BODY_PAYLOAD_KINDS,
+  getBodyPayloadKindDisplay,
 } from './bodyPayloadUserDefinitions';
 import { getMonsterSubtypeDisplayName } from './world/monsterPayloadEmission';
 
@@ -18,17 +17,13 @@ export interface BodyPayloadDisplayMeta {
 }
 
 /**
- * payloadKind는 기계적 동작 분류용이다.
- * 실제 사용자 표시명은 A/B/C 채널 정의를 우선한다.
+ * 실제 5종 payload의 UI 표시 메타.
+ * 사용자 정의가 비어 있으면 종류별 기본 표시명을 사용한다.
  */
-export const BODY_PAYLOAD_DISPLAY_META: Record<BodyPayloadKind, BodyPayloadDisplayMeta> = {
-  STANDARD_FLUID: { label: '내용물', amountLabel: '내용물 양' },
-  INSECTOID_SECRETION: { label: '분비물', amountLabel: '분비물 양' },
-  URINE: { label: '외부 유입 액체', amountLabel: '외부 유입 액체 양' },
-  EGG: { label: '알', amountLabel: '알 수', unit: '개' },
-  PARASITE: { label: '기생체', amountLabel: '기생체 수', unit: '개' },
-  OTHER: { label: '기타 내용물', amountLabel: '내용물 양' },
-};
+export const BODY_PAYLOAD_DISPLAY_META: Record<BodyPayloadKind, BodyPayloadDisplayMeta> =
+  Object.fromEntries(
+    BODY_PAYLOAD_KINDS.map((kind) => [kind, getBodyPayloadKindDisplay(kind)]),
+  ) as Record<BodyPayloadKind, BodyPayloadDisplayMeta>;
 
 export const BODY_ILLUSTRATION_STAGES: Array<Exclude<BodyLoadStage, 'EMPTY'>> = [
   'TRACE',
@@ -38,7 +33,7 @@ export const BODY_ILLUSTRATION_STAGES: Array<Exclude<BodyLoadStage, 'EMPTY'>> = 
   'SATURATED',
 ];
 
-export const BODY_ILLUSTRATION_CHANNELS: BodyPayloadChannel[] = ['A', 'B', 'C'];
+export const BODY_ILLUSTRATION_PAYLOAD_KINDS: BodyPayloadKind[] = [...BODY_PAYLOAD_KINDS];
 
 export interface BodyIllustrationSlot {
   /** 내부 연결용. UI에는 표시하지 않는다. */
@@ -47,91 +42,70 @@ export interface BodyIllustrationSlot {
   imageAlt: string;
 }
 
+type IllustrationStageMap = Record<Exclude<BodyLoadStage, 'EMPTY'>, BodyIllustrationSlot>;
+type IllustrationPayloadMap = Record<BodyPayloadKind, IllustrationStageMap>;
+
+const createStageSlots = (
+  compartmentShortId: 'C1' | 'C2',
+  payloadKind: BodyPayloadKind,
+): IllustrationStageMap => ({
+  TRACE: { slotId: `BODY_${compartmentShortId}_${payloadKind}_TRACE`, imageSrc: '', imageAlt: '' },
+  LOW: { slotId: `BODY_${compartmentShortId}_${payloadKind}_LOW`, imageSrc: '', imageAlt: '' },
+  MEDIUM: { slotId: `BODY_${compartmentShortId}_${payloadKind}_MEDIUM`, imageSrc: '', imageAlt: '' },
+  HIGH: { slotId: `BODY_${compartmentShortId}_${payloadKind}_HIGH`, imageSrc: '', imageAlt: '' },
+  SATURATED: { slotId: `BODY_${compartmentShortId}_${payloadKind}_SATURATED`, imageSrc: '', imageAlt: '' },
+});
+
+const createPayloadSlots = (compartmentShortId: 'C1' | 'C2'): IllustrationPayloadMap =>
+  Object.fromEntries(
+    BODY_ILLUSTRATION_PAYLOAD_KINDS.map((kind) => [kind, createStageSlots(compartmentShortId, kind)]),
+  ) as IllustrationPayloadMap;
+
 /**
  * 컴포넌트 1·2 전용 삽화 슬롯.
- * 2 compartments × 3 user payload channels × 5 stages = 정확히 30칸.
- * imageSrc는 사용자가 나중에 실제 자산을 연결할 때까지 빈 문자열로 유지한다.
+ * 2 compartments × 5 payload kinds × 5 stages = 정확히 50칸.
  */
 export const BODY_COMPONENT_ILLUSTRATION_SLOTS: Record<
   Extract<BodyCompartmentId, 'COMPARTMENT_1' | 'COMPARTMENT_2'>,
-  Record<BodyPayloadChannel, Record<Exclude<BodyLoadStage, 'EMPTY'>, BodyIllustrationSlot>>
+  IllustrationPayloadMap
 > = {
-  COMPARTMENT_1: {
-    A: {
-      TRACE: { slotId: 'BODY_C1_A_TRACE', imageSrc: '', imageAlt: '' },
-      LOW: { slotId: 'BODY_C1_A_LOW', imageSrc: '', imageAlt: '' },
-      MEDIUM: { slotId: 'BODY_C1_A_MEDIUM', imageSrc: '', imageAlt: '' },
-      HIGH: { slotId: 'BODY_C1_A_HIGH', imageSrc: '', imageAlt: '' },
-      SATURATED: { slotId: 'BODY_C1_A_SATURATED', imageSrc: '', imageAlt: '' },
-    },
-    B: {
-      TRACE: { slotId: 'BODY_C1_B_TRACE', imageSrc: '', imageAlt: '' },
-      LOW: { slotId: 'BODY_C1_B_LOW', imageSrc: '', imageAlt: '' },
-      MEDIUM: { slotId: 'BODY_C1_B_MEDIUM', imageSrc: '', imageAlt: '' },
-      HIGH: { slotId: 'BODY_C1_B_HIGH', imageSrc: '', imageAlt: '' },
-      SATURATED: { slotId: 'BODY_C1_B_SATURATED', imageSrc: '', imageAlt: '' },
-    },
-    C: {
-      TRACE: { slotId: 'BODY_C1_C_TRACE', imageSrc: '', imageAlt: '' },
-      LOW: { slotId: 'BODY_C1_C_LOW', imageSrc: '', imageAlt: '' },
-      MEDIUM: { slotId: 'BODY_C1_C_MEDIUM', imageSrc: '', imageAlt: '' },
-      HIGH: { slotId: 'BODY_C1_C_HIGH', imageSrc: '', imageAlt: '' },
-      SATURATED: { slotId: 'BODY_C1_C_SATURATED', imageSrc: '', imageAlt: '' },
-    },
-  },
-  COMPARTMENT_2: {
-    A: {
-      TRACE: { slotId: 'BODY_C2_A_TRACE', imageSrc: '', imageAlt: '' },
-      LOW: { slotId: 'BODY_C2_A_LOW', imageSrc: '', imageAlt: '' },
-      MEDIUM: { slotId: 'BODY_C2_A_MEDIUM', imageSrc: '', imageAlt: '' },
-      HIGH: { slotId: 'BODY_C2_A_HIGH', imageSrc: '', imageAlt: '' },
-      SATURATED: { slotId: 'BODY_C2_A_SATURATED', imageSrc: '', imageAlt: '' },
-    },
-    B: {
-      TRACE: { slotId: 'BODY_C2_B_TRACE', imageSrc: '', imageAlt: '' },
-      LOW: { slotId: 'BODY_C2_B_LOW', imageSrc: '', imageAlt: '' },
-      MEDIUM: { slotId: 'BODY_C2_B_MEDIUM', imageSrc: '', imageAlt: '' },
-      HIGH: { slotId: 'BODY_C2_B_HIGH', imageSrc: '', imageAlt: '' },
-      SATURATED: { slotId: 'BODY_C2_B_SATURATED', imageSrc: '', imageAlt: '' },
-    },
-    C: {
-      TRACE: { slotId: 'BODY_C2_C_TRACE', imageSrc: '', imageAlt: '' },
-      LOW: { slotId: 'BODY_C2_C_LOW', imageSrc: '', imageAlt: '' },
-      MEDIUM: { slotId: 'BODY_C2_C_MEDIUM', imageSrc: '', imageAlt: '' },
-      HIGH: { slotId: 'BODY_C2_C_HIGH', imageSrc: '', imageAlt: '' },
-      SATURATED: { slotId: 'BODY_C2_C_SATURATED', imageSrc: '', imageAlt: '' },
-    },
-  },
+  COMPARTMENT_1: createPayloadSlots('C1'),
+  COMPARTMENT_2: createPayloadSlots('C2'),
 };
 
-export function getDominantBodyPayloadChannel(
-  entries: Array<{ payloadKind: BodyPayloadKind; payloadChannel?: BodyPayloadChannel; amount: number }>,
-): BodyPayloadChannel {
-  const totals: Record<BodyPayloadChannel, number> = { A: 0, B: 0, C: 0 };
+export function getDominantBodyPayloadKind(
+  entries: Array<{ payloadKind: BodyPayloadKind; amount: number }>,
+): BodyPayloadKind {
+  const totals = Object.fromEntries(
+    BODY_PAYLOAD_KINDS.map((kind) => [kind, 0]),
+  ) as Record<BodyPayloadKind, number>;
+
   for (const entry of entries) {
-    const channel = resolveBodyPayloadChannel(entry.payloadKind, entry.payloadChannel);
-    totals[channel] += Math.max(0, Number(entry.amount) || 0);
+    if (!(entry.payloadKind in totals)) continue;
+    totals[entry.payloadKind] += Math.max(0, Number(entry.amount) || 0);
   }
-  return (Object.entries(totals) as Array<[BodyPayloadChannel, number]>)
-    .sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'A';
+
+  return (Object.entries(totals) as Array<[BodyPayloadKind, number]>)
+    .sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'STANDARD_FLUID';
 }
 
 export function getBodyIllustrationSlot(
   compartmentId: BodyCompartmentId,
   stage: BodyLoadStage,
-  entries: Array<{ payloadKind: BodyPayloadKind; payloadChannel?: BodyPayloadChannel; amount: number }>,
+  entries: Array<{ payloadKind: BodyPayloadKind; amount: number }>,
 ): BodyIllustrationSlot | undefined {
   if (stage === 'EMPTY') return undefined;
   if (compartmentId !== 'COMPARTMENT_1' && compartmentId !== 'COMPARTMENT_2') return undefined;
-  const channel = getDominantBodyPayloadChannel(entries);
-  return BODY_COMPONENT_ILLUSTRATION_SLOTS[compartmentId][channel][stage];
+
+  const kind = getDominantBodyPayloadKind(entries);
+  return BODY_COMPONENT_ILLUSTRATION_SLOTS[compartmentId][kind][stage];
 }
 
 export function countBodyIllustrationSlots(): number {
   let count = 0;
   for (const compartment of Object.values(BODY_COMPONENT_ILLUSTRATION_SLOTS)) {
-    for (const channel of Object.values(compartment)) {
-      count += Object.keys(channel).length;
+    for (const kind of Object.values(compartment)) {
+      count += Object.keys(kind).length;
     }
   }
   return count;
@@ -150,6 +124,6 @@ export function getBodyPayloadSourceDisplayName(entry: BodyPayloadEntry): string
   return '출처 미상';
 }
 
-export function getBodyPayloadChannelMeta(channel: BodyPayloadChannel) {
-  return getBodyPayloadChannelDisplay(channel);
+export function getBodyPayloadKindMeta(kind: BodyPayloadKind) {
+  return getBodyPayloadKindDisplay(kind);
 }

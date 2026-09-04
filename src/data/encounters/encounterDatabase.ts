@@ -1,7 +1,25 @@
 import { EncounterDefinition } from '../../types';
-import { DRAGONKIN_HUNTER_ENCOUNTER_REFERENCES } from '../dragonkin/dragonkinNarrativeReferences';
+import { DRAGONKIN_HUNTER_ENCOUNTER_REFERENCES } from '../raceNarrativeReferences';
+import { FATE_ENCOUNTERS } from './fateEncounterDatabase';
+import { PHEROMONE_ENCOUNTER_DEFINITIONS } from './pheromoneEncounterDefinitions';
+import { DEFEAT_ADULT_EVENT_DEFINITIONS } from './defeatAdultEventDefinitions';
 
 export const ENCOUNTER_DATABASE: Record<string, EncounterDefinition> = {
+  ...FATE_ENCOUNTERS,
+  ...PHEROMONE_ENCOUNTER_DEFINITIONS,
+  ...DEFEAT_ADULT_EVENT_DEFINITIONS,
+
+  // 월드맵 TravelSession의 비전투 사건 공통 컨테이너.
+  // 실제 제목/요약/연출은 playerState.worldMap.travelSession의 현재 encounter에서 읽는다.
+  world_travel_encounter: {
+    id: 'world_travel_encounter',
+    title: '여행 중 인카운터',
+    summary: '목적지로 이동하는 도중 발생한 여행 사건입니다.',
+    location: '여행 경로',
+    isPersistent: false,
+    startsCombat: false,
+    sceneReference: '현재 TravelSession에 기록된 여행 사건 하나만 진행한다. 플레이어의 대응이 끝나기 전 다음 사건이나 목적지 도착을 미리 처리하지 않는다.',
+  },
   forest_ambush_investigation: {
     id: 'forest_ambush_investigation',
     title: '어스름 숲의 의문의 발자국',

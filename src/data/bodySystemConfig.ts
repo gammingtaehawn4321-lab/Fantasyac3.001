@@ -1,9 +1,9 @@
 import type { BodyCompartmentId, BodyLoadStage, BodyPayloadKind } from '../types';
 
 export const BODY_COMPARTMENT_CAPACITY: Record<BodyCompartmentId, number> = {
-  COMPARTMENT_1: 100,
-  COMPARTMENT_2: 100,
-  COMPARTMENT_3: 80,
+  COMPARTMENT_1: 1000,
+  COMPARTMENT_2: 2500,
+  COMPARTMENT_3: 500,
 };
 
 export const BODY_LOAD_THRESHOLDS: Array<{ stage: BodyLoadStage; minRatio: number }> = [
@@ -27,7 +27,6 @@ export const BODY_PAYLOAD_EFFECTS: Record<BodyPayloadKind, {
   URINE: { desire: 4, lewdness: 0.65, corruption: 0.35, sensitivity: 1 },
   EGG: { desire: 10, lewdness: 1.4, corruption: 0.75, sensitivity: 3 },
   PARASITE: { desire: 13, lewdness: 1.6, corruption: 1.1, sensitivity: 5 },
-  OTHER: { desire: 4, lewdness: 0.4, corruption: 0.2, sensitivity: 0 },
 };
 
 export const BODY_DERIVED_EFFECT_CAPS = {
@@ -75,4 +74,47 @@ export const BLADDER_STATUS_VISUAL = {
   label: '소변 욕구',
   imageSrc: '',
   imageAlt: '',
+} as const;
+
+// ============================================================
+// 산란 / 부화 / 임신 / 기생체 확장 설정
+// ============================================================
+
+export const EGG_SYSTEM_CONFIG = {
+  /** 현재는 알 1개 = 구획 점유량 1로 계산한다. 필요하면 종류별로 조정 가능. */
+  volumePerEgg: {
+    INSECTOID_EGG: 1,
+    TENTACLE_EGG: 1,
+  },
+  incubationMinutes: {
+    INSECTOID_EGG: 1440,
+    TENTACLE_EGG: 1440,
+  },
+  reactionFluidKind: {
+    INSECTOID_EGG: 'INSECTOID_SECRETION',
+    TENTACLE_EGG: 'STANDARD_FLUID',
+  },
+  reactionTickMinutes: 60,
+  /** 구획이 100% 차 있을 때 1시간 반응당 최대 기반 증가량. */
+  desireGainAtFullLoadPerTick: 2,
+  sensitivityGainAtFullLoadPerTick: 1,
+  developingThreshold: 0.25,
+} as const;
+
+export const PARASITE_GROWTH_CONFIG = {
+  maturationMinutes: 720,
+} as const;
+
+export const PREGNANCY_SYSTEM_CONFIG = {
+  allowedCompartmentId: 'COMPARTMENT_1' as const,
+  guaranteedFillRatio: 0.80,
+  defaultGestationMinutes: 40320,
+  /**
+   * 80% 미만일 때의 1회 판정 확률.
+   * 현재 임신 가능 정액의 구획 점유율을 선형 보간해서 사용한다.
+   * 0%에서는 0%, 80% 직전에서는 최대 55%.
+   */
+  maxChanceBelowGuaranteed: 0.55,
+  /** 날짜가 바뀔 때 남아 있는 정액으로 재판정한다. */
+  rollOnDayChange: true,
 } as const;

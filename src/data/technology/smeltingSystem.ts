@@ -56,7 +56,7 @@ export const SMELTING_RECIPES: Record<string, SmeltingRecipe> = {
     id: 'smelt_iron_ingot',
     name: '철 주괴 제련',
     category: 'SMELTING',
-    inputOreId: 'copper_ore', // 철광석 맵핑
+    inputOreId: 'iron_ore',
     inputOreName: '철광석',
     inputOreCount: 4,
     fuelId: 'charcoal_sack',
@@ -288,9 +288,16 @@ export function executeSmelting(
       .filter((i) => i.id === itemNameOrId || i.name === itemNameOrId)
       .reduce((s, i) => s + (i.quantity || 1), 0);
 
-  const oreAvail = countAvailable(recipe.inputOreId) || countAvailable(recipe.inputOreName);
-  const fuelAvail = countAvailable(recipe.fuelId) || countAvailable(recipe.fuelName);
-  const extraAvail = recipe.extraMatId ? (countAvailable(recipe.extraMatId) || countAvailable(recipe.extraMatName || '')) : 99999;
+  // ID/표시명이 섞인 구 세이브도 안전하게 합산한다. `A || B`는 일부 스택을 놓칠 수 있으므로
+  // 같은 항목을 ID 또는 이름으로 한 번만 집계한다.
+  const countAvailablePair = (id?: string, name?: string) =>
+    inventory
+      .filter((i) => (!!id && i.id === id) || (!!name && i.name === name))
+      .reduce((s, i) => s + Math.max(0, i.quantity || 0), 0);
+
+  const oreAvail = countAvailablePair(recipe.inputOreId, recipe.inputOreName);
+  const fuelAvail = countAvailablePair(recipe.fuelId, recipe.fuelName);
+  const extraAvail = recipe.extraMatId ? countAvailablePair(recipe.extraMatId, recipe.extraMatName) : 99999;
 
   const maxPossibleByOre = Math.floor(oreAvail / recipe.inputOreCount);
   const maxPossibleByFuel = Math.floor(fuelAvail / recipe.fuelCount);
@@ -328,11 +335,11 @@ export function executeSmelting(
 
   // 재료 소비
   let updatedInv = [...inventory];
-  const removeItems = (idOrName: string, amount: number) => {
+  const removeItems = (id: string | undefined, name: string | undefined, amount: number) => {
     let remain = amount;
     updatedInv = updatedInv.map((item) => {
       if (remain <= 0) return item;
-      if (item.id === idOrName || item.name === idOrName) {
+      if ((!!id && item.id === id) || (!!name && item.name === name)) {
         if (item.quantity > remain) {
           const qty = item.quantity - remain;
           remain = 0;
@@ -346,10 +353,10 @@ export function executeSmelting(
     }).filter((i) => i.quantity > 0);
   };
 
-  removeItems(recipe.inputOreId, recipe.inputOreCount * actualBatchCount);
-  removeItems(recipe.fuelId, recipe.fuelCount * actualBatchCount);
+  removeItems(recipe.inputOreId, recipe.inputOreName, recipe.inputOreCount * actualBatchCount);
+  removeItems(recipe.fuelId, recipe.fuelName, recipe.fuelCount * actualBatchCount);
   if (recipe.extraMatId && recipe.extraMatCount) {
-    removeItems(recipe.extraMatId, recipe.extraMatCount * actualBatchCount);
+    removeItems(recipe.extraMatId, recipe.extraMatName, recipe.extraMatCount * actualBatchCount);
   }
 
   // 회수율 & 품질 계산

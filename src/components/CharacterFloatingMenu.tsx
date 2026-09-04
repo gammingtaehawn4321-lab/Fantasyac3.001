@@ -36,6 +36,8 @@ interface CharacterFloatingMenuProps {
   onOpenCamp: () => void;
   onOpenCompanions: () => void;
   onOpenMajorCharacters: () => void;
+  /** 큰 모달/상태창이 열렸을 때 플로팅 모험 버튼을 숨겨 겹침을 방지한다. */
+  hideAdventureFab?: boolean;
 }
 
 type MenuCategory = 'status' | 'bag' | 'growth' | 'tech' | 'adventure' | null;
@@ -44,7 +46,7 @@ const submenuMotion = {
   initial: { opacity: 0, y: 8, scale: 0.98 },
   animate: { opacity: 1, y: 0, scale: 1 },
   exit: { opacity: 0, y: 6, scale: 0.98 },
-  transition: { duration: 0.16, ease: 'easeOut' },
+  transition: { duration: 0.16 },
 };
 
 export const CharacterFloatingMenu: React.FC<CharacterFloatingMenuProps> = ({
@@ -65,14 +67,15 @@ export const CharacterFloatingMenu: React.FC<CharacterFloatingMenuProps> = ({
   onOpenCamp,
   onOpenCompanions,
   onOpenMajorCharacters,
+  hideAdventureFab = false,
 }) => {
   const [activeCategory, setActiveCategory] = useState<MenuCategory>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const quests = Object.values(playerState.quests || {}) as QuestProgress[];
-  const activeQuestCount = quests.filter((q) => q.status === 'ACTIVE').length;
   const offeredQuestCount = quests.filter((q) => q.status === 'OFFERED').length;
-  const questAlertCount = activeQuestCount + offeredQuestCount;
+  // 단순 진행 중(ACTIVE)인 퀘스트는 알림이 아니다. 엔진이 기록한 미확인 변화만 표시한다.
+  const questAlertCount = playerState.questAlertQuestIds ? new Set(playerState.questAlertQuestIds).size : offeredQuestCount;
   const hasStatPoints = (playerState.statPoints || 0) > 0;
   const hasTalentPoints = (playerState.talentPoints || 0) > 0;
 
@@ -177,27 +180,6 @@ export const CharacterFloatingMenu: React.FC<CharacterFloatingMenuProps> = ({
                 </button>
               </>
             )}
-
-            {activeCategory === 'adventure' && (
-              <>
-                <button className={subButtonClass} onClick={() => open(onOpenWorldMap)}>
-                  <Compass className="w-3.5 h-3.5 text-sky-300" /> 세계 지도
-                </button>
-                <button className={subButtonClass} onClick={() => open(onOpenQuests)}>
-                  <Scroll className="w-3.5 h-3.5 text-amber-400" /> 퀘스트
-                  {questAlertCount > 0 && <span className="text-[10px] text-amber-300">{questAlertCount}</span>}
-                </button>
-                <button className={subButtonClass} onClick={() => open(onOpenFate)}>
-                  <Sparkles className="w-3.5 h-3.5 text-violet-300" /> 운명
-                </button>
-                <button className={subButtonClass} onClick={() => open(onOpenCamp)}>
-                  <Tent className="w-3.5 h-3.5 text-emerald-400" /> 야영지
-                </button>
-                <button className={subButtonClass} onClick={() => open(onOpenMajorCharacters)}>
-                  <Users className="w-3.5 h-3.5 text-cyan-300" /> 주요 인물
-                </button>
-              </>
-            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -227,19 +209,59 @@ export const CharacterFloatingMenu: React.FC<CharacterFloatingMenuProps> = ({
           <Hammer className="w-3.5 h-3.5 text-orange-300" /> 제작
         </button>
 
-        <button className={rootButtonClass(activeCategory === 'adventure')} onClick={() => toggle('adventure')}>
-          <Compass className="w-3.5 h-3.5 text-indigo-300" /> 모험
-          {questAlertCount > 0 && (
-            <span className="ml-0.5 min-w-4 h-4 px-1 rounded-full bg-indigo-500 text-white text-[9px] flex items-center justify-center">
-              {questAlertCount}
-            </span>
-          )}
-        </button>
-
         <button className={rootButtonClass(false)} onClick={() => open(onOpenCompanions)}>
           <Users className="w-3.5 h-3.5 text-cyan-300" /> 동료
         </button>
       </div>
+
+      {/* 독립 상시 플로팅 모험 (나침반) 버튼 및 서브메뉴 — 공식 위치는 오른쪽 하단 */}
+      {!hideAdventureFab && <div className="fixed right-5 sm:right-6 bottom-[calc(118px+env(safe-area-inset-bottom,0px))] z-35 flex flex-col items-end gap-2 select-none">
+        <AnimatePresence>
+          {activeCategory === 'adventure' && (
+            <motion.div
+              key="adventure-popup"
+              {...submenuMotion}
+              className="flex flex-col sm:flex-row flex-wrap gap-1.5 max-w-[min(92vw,420px)] p-2 rounded-2xl border border-stone-800/90 bg-stone-950/96 shadow-2xl shadow-black/90 backdrop-blur-xl"
+            >
+              <button className={subButtonClass} onClick={() => open(onOpenWorldMap)}>
+                <Compass className="w-3.5 h-3.5 text-sky-300" /> 세계 지도
+              </button>
+              <button className={subButtonClass} onClick={() => open(onOpenQuests)}>
+                <Scroll className="w-3.5 h-3.5 text-amber-400" /> 퀘스트
+                {questAlertCount > 0 && <span className="text-[10px] text-amber-300">{questAlertCount}</span>}
+              </button>
+              <button className={subButtonClass} onClick={() => open(onOpenFate)}>
+                <Sparkles className="w-3.5 h-3.5 text-violet-300" /> 운명
+              </button>
+              <button className={subButtonClass} onClick={() => open(onOpenCamp)}>
+                <Tent className="w-3.5 h-3.5 text-emerald-400" /> 야영지
+              </button>
+              <button className={subButtonClass} onClick={() => open(onOpenMajorCharacters)}>
+                <Users className="w-3.5 h-3.5 text-cyan-300" /> 주요 인물
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <button
+          type="button"
+          onClick={() => toggle('adventure')}
+          className={`group relative w-[60px] h-[60px] rounded-full border-2 flex flex-col items-center justify-center transition-all duration-200 active:scale-95 shadow-xl backdrop-blur-md cursor-pointer ${
+            activeCategory === 'adventure'
+              ? 'bg-amber-500/25 border-amber-400 text-amber-200 shadow-amber-500/20 ring-2 ring-amber-500/30'
+              : 'bg-stone-950/92 hover:bg-stone-900 border-amber-500/65 hover:border-amber-400 text-amber-400 shadow-black/80'
+          }`}
+          title="모험 (세계 지도, 퀘스트, 야영지 등)"
+        >
+          <Compass className="w-6 h-6 text-amber-400 group-hover:rotate-45 transition-transform duration-300" />
+          <span className="text-[10px] font-bold text-amber-200 tracking-tight -mt-0.5">모험</span>
+          {questAlertCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1.5 rounded-full bg-indigo-600 border border-stone-950 text-white text-[10px] font-bold flex items-center justify-center shadow-md animate-pulse">
+              {questAlertCount}
+            </span>
+          )}
+        </button>
+      </div>}
     </div>
   );
 };

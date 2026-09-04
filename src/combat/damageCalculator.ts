@@ -59,6 +59,14 @@ function getStatusValue(actor: BattleActor, type: string): number {
     .reduce((sum, effect) => sum + (effect.value ?? 0), 0);
 }
 
+function hasTrait(actor: BattleActor, traitId: string): boolean {
+  return (actor.traits || []).includes(traitId);
+}
+
+function isCrisisAdrenalineActive(actor: BattleActor): boolean {
+  return hasTrait(actor, 'TALENT_CRISIS_ADRENALINE') && actor.hp > 0 && actor.hp / Math.max(1, actor.maxHp) <= 0.35;
+}
+
 function getEffectiveAccuracy(actor: BattleActor): number {
   let value = actor.stats.accuracy ?? 95;
   value += getStatusValue(actor, 'ACCURACY_UP');
@@ -95,7 +103,7 @@ export function calculateHitChance(attacker: BattleActor, defender: BattleActor,
 
 function getEffectiveAttack(actor: BattleActor, damageType: 'PHYSICAL' | 'MAGIC'): number {
   const base = damageType === 'PHYSICAL' ? actor.stats.physicalAttack : actor.stats.magicAttack;
-  let percent = 0;
+  let percent = isCrisisAdrenalineActive(actor) ? 25 : 0;
   percent += getStatusValue(actor, 'ATK_UP');
   if (damageType === 'MAGIC') percent += getStatusValue(actor, 'MAGIC_ATK_UP');
   percent -= getStatusValue(actor, 'WEAKEN');
@@ -104,7 +112,7 @@ function getEffectiveAttack(actor: BattleActor, damageType: 'PHYSICAL' | 'MAGIC'
 
 function getEffectiveDefense(actor: BattleActor, damageType: 'PHYSICAL' | 'MAGIC'): number {
   const base = damageType === 'PHYSICAL' ? actor.stats.physicalDefense : actor.stats.magicDefense;
-  let percent = getStatusValue(actor, 'DEF_UP');
+  let percent = getStatusValue(actor, 'DEF_UP') + (isCrisisAdrenalineActive(actor) ? 25 : 0);
   if (damageType === 'PHYSICAL') percent += getStatusValue(actor, 'PHYSICAL_DEF_UP');
   if (damageType === 'MAGIC') percent += getStatusValue(actor, 'MAGIC_DEF_UP');
   return Math.max(0, base * (1 + percent / 100));
@@ -115,6 +123,10 @@ function consumeInvulnerability(defender: BattleActor): boolean {
     (status) => status.type === 'INVULNERABLE' && (status.value ?? 1) > 0
   );
   if (!effect) return false;
+
+  // 불사신의 의지는 '1회 무효'가 아니라 자신의 다음 행동 종료까지 모든 피해를 무효화한다.
+  // 지속시간은 statusEffectEngine이 관리하므로 피격 횟수로 소모하지 않는다.
+  if (effect.name === '불사신의 의지') return true;
 
   effect.value = Math.max(0, (effect.value ?? 1) - 1);
   if ((effect.value ?? 0) <= 0) {
@@ -214,6 +226,7 @@ export function calculateDamage(
       0,
       (attacker.stats.criticalChance ?? 5) +
         getStatusValue(attacker, 'CRIT_UP') +
+        (isCrisisAdrenalineActive(attacker) ? 15 : 0) +
         (options.bonusCritChance ?? 0)
     )
   );
@@ -221,7 +234,7 @@ export function calculateDamage(
   const critMultiplier = isCrit
     ? Math.min(
         CRITICAL_DAMAGE_CAP,
-        Math.max(1, (attacker.stats.criticalDamage ?? 1.5) + (options.bonusCritDamage ?? 0))
+        Math.max(1, (attacker.stats.criticalDamage ?? 1.5) + getStatusValue(attacker, 'CRIT_DAMAGE_UP') / 100 + (options.bonusCritDamage ?? 0))
       )
     : 1;
 
@@ -245,6 +258,9 @@ export function calculateDamage(
   let elementMultiplier = 1;
   if (element !== 'NEUTRAL') {
     let baseResistance = defender.elementResistances?.[element] ?? 0;
+    if (element === 'FIRE') baseResistance += getStatusValue(defender, 'FIRE_RES_UP');
+    if (element === 'ICE') baseResistance += getStatusValue(defender, 'ICE_RES_UP');
+    if (element === 'LIGHTNING') baseResistance += getStatusValue(defender, 'LIGHTNING_RES_UP');
     if (element === 'FIRE') baseResistance -= getCounter(defender, 'fire_res_down');
     const elementPenetration = (attacker.stats.elementalPenetration ?? 0) + (options.elementalPenetrationBonus ?? 0);
     effectiveElementResistance = Math.min(
@@ -299,8 +315,9 @@ export function calculateDamage(
   }
 
   // 7. 흐트러짐
+  const equipmentStaggerMultiplier = attacker.traits?.includes('heavy_stagger_boost') ? 1.25 : 1;
   const baseStaggerDamage =
-    (atkPower * 0.4 + (options.bonusStagger ?? 0)) * (isCrit ? 1.5 : 1);
+    (atkPower * 0.4 + (options.bonusStagger ?? 0)) * (isCrit ? 1.5 : 1) * equipmentStaggerMultiplier;
   const defenderTenacity = Math.max(0, defender.stats.tenacity ?? 10);
   const staggerMitigation = 50 / (50 + defenderTenacity);
   const finalStaggerDamage = Math.max(

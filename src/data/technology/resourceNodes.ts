@@ -143,7 +143,7 @@ export const WORLD_RESOURCE_NODES: Record<string, ResourceNodeDefinition> = {
     requiredToolCategory: 'PICKAXE',
     requiredToolTier: 1,
     baseYield: 3,
-    primaryResourceId: 'copper_ore', // 광석 사용
+    primaryResourceId: 'iron_ore',
     primaryResourceName: '철광석',
     rareByproducts: [
       { itemId: 'coal_chunk', name: '석탄', rate: 0.40, count: 1 },

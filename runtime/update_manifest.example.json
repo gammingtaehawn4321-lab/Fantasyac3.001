@@ -1,0 +1,27 @@
+{
+  "version": "3.3.1",
+  "publishedAt": "2026-09-01T00:00:00+09:00",
+  "notes": "예시 패치",
+  "minimumSaveSchema": 1,
+  "packages": {
+    "WINDOWS": {
+      "url": "https://github.com/OWNER/REPO/releases/download/v3.3.1/Fantasyac-Windows-v3.3.1.zip",
+      "sha256": "",
+      "notes": "ApplyUpdate.ps1로 적용"
+    },
+    "ANDROID": {
+      "url": "https://github.com/OWNER/REPO/releases/download/v3.3.1/Fantasyac-Android-v3.3.1.apk",
+      "sha256": "",
+      "notes": "동일 applicationId/서명 APK 업데이트 설치"
+    },
+    "IPADOS": {
+      "url": "https://github.com/OWNER/REPO/releases/download/v3.3.1/Fantasyac-iPadOS-v3.3.1.ipa",
+      "sha256": "",
+      "notes": "동일 Bundle ID/서명 앱 업데이트"
+    },
+    "IOS": {
+      "url": "https://github.com/OWNER/REPO/releases/download/v3.3.1/Fantasyac-iOS-v3.3.1.ipa",
+      "sha256": ""
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { PlayerState } from '../types';
 import { AdaptiveCharacterImage } from './AdaptiveCharacterImage';
+import IllustrationImage from './IllustrationImage';
 import {
   EquipmentSlot,
   EQUIPMENT_DATABASE,
@@ -256,7 +257,7 @@ export const EquipmentTab: React.FC<EquipmentTabProps> = ({
             }`}
           >
             {itemImage ? (
-              <img
+              <IllustrationImage
                 src={itemImage}
                 alt={def?.name || ''}
                 className="w-full h-full object-cover"
@@ -675,7 +676,7 @@ export const EquipmentTab: React.FC<EquipmentTabProps> = ({
                       id={`equip-btn-${def.id}`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (selectedSlot && selectedSlot !== 'BAG') {
+                        if (selectedSlot) {
                           onEquipItem(selectedSlot, def.id);
                         }
                       }}
